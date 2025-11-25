@@ -123,19 +123,39 @@ class AuctionManager:
             with open(filepath, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    # Skip header rows and empty rows
-                    if (
-                        not row.get("First Name")
-                        or row.get("First Name", "").strip() == ""
-                    ):
-                        continue
-
+                    # Get values
                     first_name = row.get("First Name", "").strip()
                     surname = row.get("Surname", "").strip()
                     set_name = row.get("2025 Set", "").strip()
-                    base_price_str = row.get("Base Price", "20").strip()
+                    base_price_str = row.get("Base Price", "").strip()
+                    list_sr_no = row.get("List Sr.No.", "").strip()
 
+                    # Skip if no first name
                     if not first_name:
+                        continue
+
+                    # Skip header rows - check if first_name contains header text
+                    if any(
+                        header_text in first_name.lower()
+                        for header_text in [
+                            "first name",
+                            "tata ipl",
+                            "auction list",
+                            "reserve",
+                        ]
+                    ):
+                        continue
+
+                    # Skip rows where first_name is a number only (invalid data)
+                    if first_name.isdigit():
+                        continue
+
+                    # Skip if set_name is empty (incomplete data)
+                    if not set_name:
+                        continue
+
+                    # Skip if list_sr_no is empty (likely a gap/header row)
+                    if not list_sr_no or not list_sr_no.replace(".", "").isdigit():
                         continue
 
                     # Construct full name
@@ -143,18 +163,20 @@ class AuctionManager:
 
                     # Convert base price from Lakh to rupees
                     try:
-                        base_price = int(
-                            float(base_price_str) * 100000
-                        )  # Lakh to rupees
+                        if base_price_str:
+                            base_price = int(
+                                float(base_price_str) * 100000
+                            )  # Lakh to rupees
+                        else:
+                            base_price = DEFAULT_BASE_PRICE
                     except:
                         base_price = DEFAULT_BASE_PRICE
 
                     # Group by set
-                    if set_name:
-                        if set_name not in players_by_set:
-                            players_by_set[set_name] = []
-                            self.db.create_list(set_name.lower())
-                        players_by_set[set_name].append((player_name, base_price))
+                    if set_name not in players_by_set:
+                        players_by_set[set_name] = []
+                        self.db.create_list(set_name.lower())
+                    players_by_set[set_name].append((player_name, base_price))
 
             # Add all players to their sets
             total_players = 0
