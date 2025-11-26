@@ -388,6 +388,29 @@ async def load_csv(interaction: discord.Interaction, list_name: str, filepath: s
     await interaction.followup.send(message)
 
 
+@bot.tree.command(
+    name="loadsets", description="Load players from IPL CSV by set number (Admin only)"
+)
+@app_commands.describe(max_set="Load players from sets 1 to this number (1-79)")
+@app_commands.checks.has_permissions(administrator=True)
+async def load_sets(interaction: discord.Interaction, max_set: int):
+    """Load players from the IPL auction CSV file, filtering by set number.
+
+    Example: /loadsets 10 will load all players from sets 1 through 10.
+    The CSV must have a 'Set No.' column with values 1-79.
+    """
+    await interaction.response.defer()
+
+    if max_set < 1 or max_set > 79:
+        await interaction.followup.send(
+            "max_set must be between 1 and 79", ephemeral=True
+        )
+        return
+
+    success, message = bot.auction_manager.load_players_from_sets(max_set)
+    await interaction.followup.send(message)
+
+
 @bot.tree.command(name="showlists", description="Display all lists and their contents")
 async def show_lists(interaction: discord.Interaction):
     """Display all lists and their contents"""
@@ -593,7 +616,8 @@ async def help_command(interaction: discord.Interaction):
 **List Management:**
 `/createlist name` - Create player list
 `/addplayer list player` - Add player
-`/loadcsv list filepath` - Load from CSV
+`/loadsets max_set` - Load IPL players from sets 1 to max_set (1-79)
+`/loadcsv list filepath` - Load from custom CSV
 `/showlists` - Display all lists
 `/setorder lists` - Set auction order
 

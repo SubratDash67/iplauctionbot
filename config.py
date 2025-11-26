@@ -15,7 +15,7 @@ PLAYER_GAP = 20  # seconds gap between players
 LIST_GAP = 20  # seconds gap between lists
 MANUAL_SELL_COOLDOWN = 15  # seconds - minimum time before admin can /soldto
 DEFAULT_BASE_PRICE = 2000000  # 20 Lakh base price
-DEFAULT_PURSE = 12000000000  # 120 Crore per team
+DEFAULT_PURSE = 1200000000  # 120 Crore per team (120 * 10^7)
 
 # CSV File Path
 DEFAULT_CSV_FILE = "1731674068078_TATA IPL 2025- Auction List -15.11.24.csv"

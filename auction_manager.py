@@ -5,6 +5,7 @@ Handles all auction-related logic with atomic operations, auto-bid, and anti-sni
 
 import asyncio
 import time
+import re
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -83,118 +84,259 @@ class AuctionManager:
         self._auto_load_csv_players()
 
     def _initialize_retained_players(self):
-        """Add retained players to team squads"""
+        """Add retained players to team squads (only if not already added)"""
+        existing_squads = self.db.get_all_squads()
+
         for team_code, players in RETAINED_PLAYERS.items():
+            # Get existing players for this team (lowercase for comparison)
+            existing_players = set()
+            if team_code in existing_squads:
+                existing_players = {
+                    name.lower() for name, _ in existing_squads[team_code]
+                }
+
             for player_name, salary in players:
-                self.db.add_to_squad(team_code, player_name, salary)
+                # Only add if not already in squad
+                if player_name.lower() not in existing_players:
+                    self.db.add_to_squad(team_code, player_name, salary)
 
     def _auto_load_csv_players(self):
-        """Auto-load players from default CSV file"""
-        import os
+        """Auto-load players from default CSV file - DISABLED, admin must use /loadsets command"""
+        # Auto-loading disabled - admin should manually load sets using /loadsets command
+        # This gives admin control over which sets to include in the auction
+        pass
 
-        csv_path = os.path.join(os.path.dirname(__file__), DEFAULT_CSV_FILE)
-        if os.path.exists(csv_path):
-            try:
-                success, msg = self._load_ipl_csv(csv_path)
-                if success:
-                    print(f"✅ Auto-loaded players from CSV: {msg}")
-                else:
-                    print(f"⚠️  CSV load warning: {msg}")
-            except Exception as e:
-                print(f"⚠️  Could not auto-load CSV: {e}")
+    def _load_ipl_csv(
+        self, filepath: str, max_set: Optional[int] = None
+    ) -> Tuple[bool, str]:
+        """Robust loader for messy IPL CSVs.
 
-    def _load_ipl_csv(self, filepath: str) -> Tuple[bool, str]:
-        """Load IPL auction CSV with specific format"""
+        - Detects and uses the real header row (handles repeated header blocks)
+        - Normalizes header names and builds index map
+        - Skips junk rows and repeated headers
+        - Parses Base Price robustly (handles '200', '150', '30', 'Rs 200', '₹200', commas)
+        - Groups players by set number and writes to DB
+        - max_set: If provided, only load players from sets 1 to max_set (inclusive)
+        """
         import csv
 
         try:
-            # Check if players already loaded (avoid duplicate loading)
+            # If players already present, avoid double load
             existing_lists = self.db.get_player_lists()
             if existing_lists:
-                # Check if any list has players
                 for list_name, players in existing_lists.items():
                     if players:
                         return (
                             True,
-                            f"Players already loaded ({len(existing_lists)} lists exist)",
+                            f"Players already loaded ({len(existing_lists)} lists exist). Use /clear first to reload.",
                         )
 
             players_by_set = {}
-            with open(filepath, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    # Get values
-                    first_name = row.get("First Name", "").strip()
-                    surname = row.get("Surname", "").strip()
-                    set_name = row.get("2025 Set", "").strip()
-                    base_price_str = row.get("Base Price", "").strip()
-                    list_sr_no = row.get("List Sr.No.", "").strip()
+            row_count = 0
+            skipped_count = 0
+            header = None
+            header_map = {}
 
-                    # Skip if no first name
-                    if not first_name:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
+                # Use csv.reader to preserve quoted fields (handles "MI,RR" etc)
+                reader = csv.reader(f)
+                for raw_row in reader:
+                    row_count += 1
+                    # Normalize all cells (strip) - keep empty strings
+                    row = [cell.strip() if cell is not None else "" for cell in raw_row]
+
+                    # Skip completely empty rows
+                    if not any(cell for cell in row):
+                        skipped_count += 1
                         continue
 
-                    # Skip header rows - check if first_name contains header text
+                    # If header not discovered yet, try to detect a header row
+                    if header is None:
+                        low_cells = [c.lower() for c in row if c]
+                        # Look for signs of the real header
+                        if (
+                            any("first name" in c for c in low_cells)
+                            or any("list sr" in c for c in low_cells)
+                            or any("2025 set" in c for c in low_cells)
+                        ):
+                            header = row
+                            # Build normalized header -> index map
+                            for i, col in enumerate(header):
+                                if not col:
+                                    continue
+                                key = col.lower().strip()
+                                # normalize common punctuation/spacing
+                                key = re.sub(r"[\s\._\-]+", "", key)
+                                header_map[key] = i
+                            # keep going to next row
+                            continue
+                        else:
+                            # preliminary junk before header
+                            skipped_count += 1
+                            continue
+
+                    # If header already found, skip repeated header lines (some files repeat headers)
+                    first_cell = row[0].lower() if row and row[0] else ""
                     if any(
-                        header_text in first_name.lower()
-                        for header_text in [
+                        h in first_cell
+                        for h in (
+                            "list sr.no",
+                            "list sr.no.",
+                            "list sr",
                             "first name",
                             "tata ipl",
                             "auction list",
-                            "reserve",
-                        ]
+                        )
                     ):
+                        skipped_count += 1
                         continue
 
-                    # Skip rows where first_name is a number only (invalid data)
-                    if first_name.isdigit():
+                    # Helper: get column safely by a set of candidate header names
+                    def get_col(*names):
+                        for name in names:
+                            n = re.sub(r"[\s\._\-]+", "", name.lower())
+                            idx = header_map.get(n)
+                            if idx is not None and idx < len(row):
+                                return row[idx]
+                        return ""
+
+                    first_name = get_col("First Name", "Firstname", "Player Name")
+                    surname = get_col("Surname", "Last Name", "Lastname")
+                    # Use "Set No." column which has simple numbers 1-79
+                    set_no_str = get_col("Set No.", "Set No", "SetNo", "Set")
+                    base_price_str = get_col(
+                        "Base Price", "BasePrice", "Base Price (Lakh)", "Baseprice"
+                    )
+                    list_sr_no = get_col(
+                        "List Sr.No.",
+                        "List Sr.No",
+                        "List Sr No",
+                        "ListSrNo",
+                        "Sr.No.",
+                        "Sr. No.",
+                    )
+
+                    # Skip rows missing essential fields
+                    if not first_name:
+                        skipped_count += 1
                         continue
 
-                    # Skip if set_name is empty (incomplete data)
-                    if not set_name:
+                    # Filter out header-like rows within data (e.g. stray header repeated)
+                    fn_lower = first_name.lower()
+                    if (
+                        fn_lower in ("first name", "player name", "name")
+                        or "tata ipl" in fn_lower
+                        or "auction list" in fn_lower
+                    ):
+                        skipped_count += 1
                         continue
 
-                    # Skip if list_sr_no is empty (likely a gap/header row)
-                    if not list_sr_no or not list_sr_no.replace(".", "").isdigit():
+                    # Skip rows where first_name is only numeric
+                    if first_name.replace(".", "").replace(" ", "").isdigit():
+                        skipped_count += 1
                         continue
 
-                    # Construct full name
+                    # set_no_str required and must be numeric
+                    if not set_no_str:
+                        skipped_count += 1
+                        continue
+
+                    # Parse set number
+                    try:
+                        set_number = int(float(set_no_str.replace(",", "")))
+                    except (ValueError, TypeError):
+                        skipped_count += 1
+                        continue
+
+                    # Filter by max_set if provided
+                    if max_set is not None and set_number > max_set:
+                        skipped_count += 1
+                        continue
+
+                    # list_sr_no should look numeric-ish
+                    if not list_sr_no:
+                        skipped_count += 1
+                        continue
+                    try:
+                        float(list_sr_no.replace(",", ""))
+                    except Exception:
+                        skipped_count += 1
+                        continue
+
+                    # Compose player name
                     player_name = f"{first_name} {surname}".strip()
 
-                    # Convert base price from Lakh to rupees
-                    try:
-                        if base_price_str:
-                            base_price = int(
-                                float(base_price_str) * 100000
-                            )  # Lakh to rupees
-                        else:
+                    # Parse base price robustly
+                    base_price = DEFAULT_BASE_PRICE
+                    if base_price_str:
+                        try:
+                            # Remove currency symbols and stray text, keep digits and dot
+                            clean = re.sub(r"[^\d\.]", "", base_price_str)
+                            if clean:
+                                val = float(clean)
+                                # Heuristic:
+                                # - if the value is a small number (<10000) treat as Lakh (e.g. 200 -> 200 Lakh)
+                                # - if value is very large (>=10000) treat as rupees already
+                                if val < 10000:
+                                    base_price = int(val * 100000)  # lakh -> rupees
+                                else:
+                                    base_price = int(val)
+                        except Exception:
+                            # fallback to default
                             base_price = DEFAULT_BASE_PRICE
-                    except:
-                        base_price = DEFAULT_BASE_PRICE
 
-                    # Group by set
-                    if set_name not in players_by_set:
-                        players_by_set[set_name] = []
-                        self.db.create_list(set_name.lower())
-                    players_by_set[set_name].append((player_name, base_price))
+                    # register player into players_by_set using set number as key
+                    set_key = f"set_{set_number}"
+                    if set_key not in players_by_set:
+                        players_by_set[set_key] = []
+                        # create DB list lazily
+                        try:
+                            self.db.create_list(set_key)
+                        except Exception:
+                            pass
 
-            # Add all players to their sets
+                    players_by_set[set_key].append((player_name, base_price))
+
+            # Summary prints
+            print(f"\nCSV Parsing Summary:")
+            print(f"Total rows read: {row_count}")
+            print(f"Rows skipped: {skipped_count}")
+            print(f"Sets found: {len(players_by_set)}")
+            if max_set:
+                print(f"Max set filter: 1 to {max_set}")
+
+            # Add all players to their sets in DB
             total_players = 0
             for set_name, players in players_by_set.items():
-                self.db.add_players_to_list(set_name.lower(), players)
+                self.db.add_players_to_list(set_name, players)
                 total_players += len(players)
+                print(f"  {set_name}: {len(players)} players")
 
-            # Set default list order
+            # If we found some sets, set numeric order (set_1, set_2, ..., set_N)
             if players_by_set:
-                list_order = sorted(players_by_set.keys(), key=lambda x: x.lower())
-                self.db.set_list_order([s.lower() for s in list_order])
+                # Sort numerically by extracting the number from "set_X"
+                def get_set_num(s):
+                    try:
+                        return int(s.replace("set_", ""))
+                    except:
+                        return 999
 
+                list_order = sorted(players_by_set.keys(), key=get_set_num)
+                self.db.set_list_order(list_order)
+
+            max_set_msg = f" (sets 1-{max_set})" if max_set else ""
             return (
                 True,
-                f"Loaded {total_players} players from {len(players_by_set)} sets",
+                f"Loaded {total_players} players from {len(players_by_set)} sets{max_set_msg}",
             )
 
+        except FileNotFoundError:
+            return False, f"CSV file not found: {filepath}"
         except Exception as e:
+            import traceback
+
+            error_details = traceback.format_exc()
+            print(f"Error loading CSV:\n{error_details}")
             return False, f"Error loading CSV: {str(e)}"
 
     def _load_state_from_db(self):
@@ -272,6 +414,31 @@ class AuctionManager:
             return True, f"Loaded {len(players)} players into {list_name}"
         except Exception as e:
             return False, str(e)
+
+    def load_players_from_sets(
+        self, max_set: int, filepath: str = None
+    ) -> Tuple[bool, str]:
+        """Load players from the IPL CSV file, filtering by set number.
+
+        Args:
+            max_set: Load players from sets 1 to max_set (inclusive)
+            filepath: Optional path to CSV file. Uses default if not provided.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        import os
+
+        if filepath is None:
+            filepath = os.path.join(os.path.dirname(__file__), DEFAULT_CSV_FILE)
+
+        if not os.path.exists(filepath):
+            return False, f"CSV file not found: {filepath}"
+
+        if max_set < 1 or max_set > 79:
+            return False, "max_set must be between 1 and 79"
+
+        return self._load_ipl_csv(filepath, max_set=max_set)
 
     def set_list_order(self, order: List[str]) -> Tuple[bool, str]:
         """Set custom order for lists"""
@@ -442,7 +609,7 @@ class AuctionManager:
         # Update state
         self.current_bid = min_bid
         self.highest_bidder = team_upper
-        self.seconds_since_last_bid = 0
+        self.last_bid_time = timestamp
 
         # Record bid in history
         self.db.record_bid(
@@ -469,6 +636,7 @@ class AuctionManager:
             team=self.highest_bidder,
             is_auto_bid=is_auto,
             auto_bids_triggered=auto_bids_triggered,
+            original_bid_amount=min_bid,
         )
 
     # ==================== AUTO-BID (PROXY BIDDING) ====================
@@ -622,7 +790,7 @@ class AuctionManager:
             f'Released {p_name} from {team_upper}. Refunded {format_amount(salary)}. Player added to "released_players" list for auction.',
         )
 
-    # ==================== SALE FINALIZATION ===================="
+    # ==================== SALE FINALIZATION ====================
 
     def finalize_sale(self) -> Tuple[bool, Optional[str], int]:
         """Finalize the sale of current player"""
