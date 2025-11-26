@@ -179,7 +179,9 @@ class FileManager:
             wb = openpyxl.load_workbook(filepath)
             sheet = wb["Auction Results"]
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.append([player, team, price, timestamp])
+            # Format price as cr/L for readability
+            formatted_price = format_amount(price)
+            sheet.append([player, team, formatted_price, timestamp])
             wb.save(filepath)
         except Exception as e:
             raise Exception(f"Error saving to Excel: {str(e)}")
@@ -211,10 +213,63 @@ class FileManager:
 
             for team, purse_left in sorted(teams.items()):
                 spent = DEFAULT_PURSE - purse_left
-                ts.append([team, len(team_squads.get(team, [])), spent, purse_left])
+                # Format amounts as cr/L for readability
+                ts.append(
+                    [
+                        team,
+                        len(team_squads.get(team, [])),
+                        format_amount(spent),
+                        format_amount(purse_left),
+                    ]
+                )
             wb.save(filepath)
         except Exception as e:
             raise Exception(f"Error updating team summary: {str(e)}")
+
+    @staticmethod
+    def regenerate_excel_from_db(
+        filepath: str,
+        sales: List[dict],
+        teams: Dict[str, int],
+        team_squads: Dict[str, List[Tuple[str, int]]],
+    ) -> None:
+        """Regenerate the entire Excel file from database sales records.
+
+        Use this after rollback to ensure Excel matches DB state.
+        """
+        try:
+            # Initialize fresh Excel file
+            FileManager.initialize_excel(filepath)
+
+            if not sales:
+                # No sales, just update team summary
+                FileManager.update_team_summary(filepath, teams, team_squads)
+                return
+
+            wb = openpyxl.load_workbook(filepath)
+            sheet = wb["Auction Results"]
+
+            # Add all sales from DB
+            for sale in sales:
+                formatted_price = format_amount(sale.get("final_price", 0))
+                timestamp = sale.get(
+                    "sold_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                )
+                sheet.append(
+                    [
+                        sale.get("player_name", "Unknown"),
+                        sale.get("team_code", "Unknown"),
+                        formatted_price,
+                        timestamp,
+                    ]
+                )
+
+            wb.save(filepath)
+
+            # Update team summary
+            FileManager.update_team_summary(filepath, teams, team_squads)
+        except Exception as e:
+            raise Exception(f"Error regenerating Excel: {str(e)}")
 
 
 # -----------------------------------------------------------

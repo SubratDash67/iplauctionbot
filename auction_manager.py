@@ -351,8 +351,13 @@ class AuctionManager:
         self.highest_bidder = state.get("highest_bidder")
         self.countdown_seconds = state.get("countdown_seconds", DEFAULT_COUNTDOWN)
 
-        # Runtime state (not persisted) - Use timestamp instead of counter
-        self.last_bid_time = time.time()
+        # Load last_bid_time from DB (persisted for timer consistency)
+        db_last_bid_time = state.get("last_bid_time", 0)
+        if db_last_bid_time and db_last_bid_time > 0:
+            self.last_bid_time = db_last_bid_time
+        else:
+            self.last_bid_time = time.time()
+
         self.countdown_remaining = self.countdown_seconds
 
     def _save_state_to_db(self):
@@ -366,6 +371,7 @@ class AuctionManager:
             current_bid=self.current_bid,
             highest_bidder=self.highest_bidder,
             countdown_seconds=self.countdown_seconds,
+            last_bid_time=self.last_bid_time,
         )
 
     @property
@@ -594,7 +600,13 @@ class AuctionManager:
             return BidResult(False, "Invalid team name")
 
         # Calculate minimum valid bid
-        min_bid = self.current_bid + get_bid_increment(self.current_bid)
+        # First bid is at base price, subsequent bids add increment
+        if self.highest_bidder is None:
+            # No bids yet - first bid is at base price
+            min_bid = self.base_price
+        else:
+            # Subsequent bids add increment to current bid
+            min_bid = self.current_bid + get_bid_increment(self.current_bid)
 
         # Check purse
         if teams[team_upper] < min_bid:
@@ -738,6 +750,53 @@ class AuctionManager:
 
         return auto_bids_triggered
 
+    # ==================== RE-AUCTION UNSOLD PLAYERS ====================
+
+    def reauction_player(self, player_name: str) -> Tuple[bool, str]:
+        """Add an unsold player back to auction pool at their original base price.
+
+        Args:
+            player_name: Name of the player to re-auction (searches for match)
+
+        Returns:
+            Tuple of (success, message)
+        """
+        # Find the player in the database
+        player_data = self.db.find_player_by_name(player_name)
+
+        if not player_data:
+            return False, f"Player **{player_name}** not found in auction database."
+
+        player_id, actual_name, list_name, base_price, auctioned = player_data
+
+        if auctioned == 0:
+            return (
+                False,
+                f"**{actual_name}** is already in the auction pool (not yet auctioned).",
+            )
+
+        # Check if player was sold (in a squad)
+        squads = self.db.get_all_squads()
+        for team, squad in squads.items():
+            for name, _ in squad:
+                if name.lower() == actual_name.lower():
+                    return (
+                        False,
+                        f"**{actual_name}** was already sold to **{team}**. Use /rollback to undo the sale first.",
+                    )
+
+        # Use original base price from CSV
+        if base_price is None:
+            base_price = DEFAULT_BASE_PRICE
+
+        # Reset the player's auctioned status so they can be auctioned again
+        self.db.reset_player_auctioned_status(player_id)
+
+        return (
+            True,
+            f"**{actual_name}** has been added back to auction in **{list_name}** with base price {format_amount(base_price)}",
+        )
+
     # ==================== RETAINED PLAYERS ====================
 
     def release_retained_player(self, team: str, player_name: str) -> Tuple[bool, str]:
@@ -794,6 +853,9 @@ class AuctionManager:
 
     def finalize_sale(self) -> Tuple[bool, Optional[str], int]:
         """Finalize the sale of current player"""
+        # CRITICAL: Reload state from DB to ensure we have latest highest_bidder
+        self._load_state_from_db()
+
         if not self.current_player:
             return False, None, 0
 
