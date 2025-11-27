@@ -6,8 +6,12 @@ Handles all auction-related logic with atomic operations, auto-bid, and anti-sni
 import asyncio
 import time
 import re
+import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
+
+# Get logger from main bot module
+logger = logging.getLogger("AuctionBot.Manager")
 
 from config import (
     DEFAULT_BASE_PRICE,

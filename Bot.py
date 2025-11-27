@@ -10,10 +10,22 @@ from discord.ext import commands
 import asyncio
 import os
 import time
+import logging
 from typing import Optional, Dict
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler("auction_bot.log", encoding="utf-8"),
+        logging.StreamHandler(),  # Also print to console
+    ],
+)
+logger = logging.getLogger("AuctionBot")
 
 from config import (
     BOT_TOKEN,
