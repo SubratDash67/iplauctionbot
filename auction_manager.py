@@ -17,6 +17,7 @@ from config import (
     PLAYER_GAP,
     LIST_GAP,
     DEFAULT_CSV_FILE,
+    TEAMS,
     get_bid_increment,
 )
 from database import Database
@@ -50,16 +51,21 @@ class AuctionManager:
         self.file_manager = FileManager()
         self.formatter = MessageFormatter()
 
-        # Initialize teams with retained players deducted
+        # Initialize teams with retained players deducted - ONLY if no existing teams
         adjusted_teams = {}
         for team_code, initial_purse in teams.items():
             remaining = get_remaining_purse(team_code, initial_purse)
             adjusted_teams[team_code] = remaining
 
-        self.db.init_teams(adjusted_teams)
+        # Only initialize teams if database is empty (preserves data across bot restarts)
+        teams_initialized = self.db.init_teams_if_empty(adjusted_teams)
 
-        # Add retained players to squads
-        self._initialize_retained_players()
+        # Add retained players to squads (only if teams were just initialized or squads are empty)
+        if teams_initialized:
+            self._initialize_retained_players()
+        else:
+            # Still check and add any missing retained players
+            self._initialize_retained_players()
 
         self._bid_lock = asyncio.Lock()
 
@@ -70,7 +76,7 @@ class AuctionManager:
         try:
             self.file_manager.initialize_excel(self.excel_file)
         except Exception as e:
-            print(f"Warning: Could not initialize Excel file: {e}")
+            logger.warning(f"Could not initialize Excel file: {e}")
 
         self._auto_load_csv_players()
 
@@ -270,13 +276,13 @@ class AuctionManager:
 
                     players_by_set[set_key].append((player_name, base_price))
 
-            print(f"\nCSV Parsing Summary:")
-            print(f"Total rows read: {row_count}")
-            print(f"Rows skipped: {skipped_count}")
-            print(f"New sets found: {len(players_by_set)}")
-            print(f"Existing sets skipped: {len(existing_set_names)}")
+            logger.info(
+                f"CSV Parsing Summary: {row_count} rows read, {skipped_count} skipped, {len(players_by_set)} new sets"
+            )
             if max_set:
-                print(f"Max set filter: 1 to {max_set}")
+                logger.info(f"Max set filter: 1 to {max_set}")
+            if existing_set_names:
+                logger.info(f"Existing sets skipped: {len(existing_set_names)}")
 
             if not players_by_set:
                 return (
@@ -288,7 +294,7 @@ class AuctionManager:
             for set_name, players in players_by_set.items():
                 self.db.add_players_to_list(set_name, players)
                 total_players += len(players)
-                print(f"  {set_name}: {len(players)} players")
+                logger.debug(f"  {set_name}: {len(players)} players")
 
             # Update list order to include new sets (merge with existing)
             if players_by_set:
@@ -324,7 +330,7 @@ class AuctionManager:
             import traceback
 
             error_details = traceback.format_exc()
-            print(f"Error loading CSV:\n{error_details}")
+            logger.error(f"Error loading CSV: {error_details}")
             return False, f"Error loading CSV: {str(e)}"
 
     def _load_state_from_db(self):
@@ -905,8 +911,18 @@ class AuctionManager:
             return False, None, 0
 
         player = self.current_player
-        team = self.highest_bidder
-        amount = self.current_bid
+
+        # CRITICAL FIX: Get the winning bid from bid_history table - authoritative source
+        # This prevents the "wrong team sold" bug caused by stale in-memory state
+        highest_bid = self.db.get_highest_bid_for_player(player)
+
+        if highest_bid:
+            team = highest_bid["team_code"]
+            amount = highest_bid["amount"]
+        else:
+            # No bids - player goes unsold
+            team = None
+            amount = 0
 
         # Check if already sold (Double-Sold Safety)
         squads = self.db.get_all_squads()
@@ -931,13 +947,12 @@ class AuctionManager:
                 teams = self.db.get_teams()
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
-                unauctioned = self.db.get_all_unauctioned_players()
 
                 self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads, unauctioned
+                    self.excel_file, sales, teams, squads
                 )
             except Exception as e:
-                print(f"Error saving to Excel: {e}")
+                logger.error(f"Error saving to Excel: {e}")
 
             # CRITICAL: Clear player state AFTER successful sale to prevent double-sell
             self._reset_player_state()
@@ -974,13 +989,12 @@ class AuctionManager:
                 teams = self.db.get_teams()
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
-                unauctioned = self.db.get_all_unauctioned_players()
 
                 self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads, unauctioned
+                    self.excel_file, sales, teams, squads
                 )
             except Exception as e:
-                print(f"Error updating Excel on rollback: {e}")
+                logger.error(f"Error updating Excel on rollback: {e}")
 
         return sale
 
@@ -988,10 +1002,22 @@ class AuctionManager:
         self._reset_state()
         self.db.full_reset()
 
+        # Re-initialize teams with retained players deducted
+        adjusted_teams = {}
+        for team_code, initial_purse in TEAMS.items():
+            remaining = get_remaining_purse(team_code, initial_purse)
+            adjusted_teams[team_code] = remaining
+
+        # Force initialize teams (since we just did full_reset)
+        self.db.init_teams(adjusted_teams)
+
+        # Re-add retained players to squads
+        self._initialize_retained_players()
+
         try:
             self.file_manager.initialize_excel(self.excel_file)
         except Exception as e:
-            print(f"Error reinitializing Excel: {e}")
+            logger.error(f"Error reinitializing Excel: {e}")
 
     # ==================== DISPLAY HELPERS ====================
 

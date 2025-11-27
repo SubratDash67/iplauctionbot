@@ -183,7 +183,7 @@ class Database:
     # ==================== TEAM OPERATIONS ====================
 
     def init_teams(self, teams: Dict[str, int]):
-        """Initialize teams with purses"""
+        """Initialize teams with purses - ONLY if no teams exist"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM teams")
@@ -192,6 +192,21 @@ class Database:
                     "INSERT INTO teams (team_code, purse, original_purse) VALUES (?, ?, ?)",
                     (team_code, purse, purse),
                 )
+
+    def init_teams_if_empty(self, teams: Dict[str, int]) -> bool:
+        """Initialize teams ONLY if teams table is empty. Returns True if initialized."""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as cnt FROM teams")
+            if cursor.fetchone()["cnt"] > 0:
+                return False  # Teams already exist, do nothing
+
+            for team_code, purse in teams.items():
+                cursor.execute(
+                    "INSERT INTO teams (team_code, purse, original_purse) VALUES (?, ?, ?)",
+                    (team_code, purse, purse),
+                )
+            return True
 
     def get_teams(self) -> Dict[str, int]:
         """Get all teams with current purses"""
@@ -582,6 +597,17 @@ class Database:
                 "SELECT * FROM bid_history ORDER BY timestamp DESC LIMIT ?", (limit,)
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_highest_bid_for_player(self, player_name: str) -> Optional[dict]:
+        """Get the highest (latest) bid for a player - authoritative source for sale finalization"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM bid_history WHERE player_name = ? ORDER BY amount DESC, timestamp DESC LIMIT 1",
+                (player_name,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
     def count_bids_for_player(self, player_name: str) -> int:
         """Count total bids for a player"""

@@ -52,20 +52,36 @@ class AuctionBot(commands.Bot):
         self.user_teams: Dict[int, str] = {}
 
     async def setup_hook(self):
-        print("Syncing slash commands globally...")
+        logger.info("Syncing slash commands globally...")
         await self.tree.sync()
-        print("Slash commands synced!")
+        logger.info("Slash commands synced!")
 
     async def on_ready(self):
-        print(f"Logged in as {self.user.name} (ID: {self.user.id})")
-        print("Bot is ready! Use /help to see all commands.")
+        logger.info(f"Logged in as {self.user.name} (ID: {self.user.id})")
+        logger.info("Bot is ready! Use /help to see all commands.")
+
+        # Validate retained players match team configuration
+        from retained_players import RETAINED_PLAYERS
+
+        for team_code in RETAINED_PLAYERS.keys():
+            if team_code not in TEAMS:
+                logger.error(
+                    f"CONFIGURATION ERROR: Team '{team_code}' in retained_players.py not found in TEAMS config!"
+                )
+        for team_code in TEAMS.keys():
+            if team_code not in RETAINED_PLAYERS:
+                logger.warning(f"Team '{team_code}' has no retained players defined.")
 
         self.user_teams = self.auction_manager.db.get_all_user_teams()
-        print(f"Loaded {len(self.user_teams)} user-team assignments from database.")
+        logger.info(
+            f"Loaded {len(self.user_teams)} user-team assignments from database."
+        )
 
         if self.auction_manager.active and not self.auction_manager.paused:
-            print("⚠️  WARNING: Auction was active before restart.")
-            print("⚠️  Marking as paused for safety. Admin must /resume to continue.")
+            logger.warning(
+                "Auction was active before restart. Marking as paused for safety."
+            )
+            logger.warning("Admin must use /resume to continue.")
             self.auction_manager.paused = True
             self.auction_manager._save_state_to_db()
 
@@ -96,7 +112,7 @@ class AuctionBot(commands.Bot):
             self.auction_manager.stats_message_id = msg.id
             self.auction_manager._save_state_to_db()
         except Exception as e:
-            print(f"Error updating stats display: {e}")
+            logger.error(f"Error updating stats display: {e}")
 
 
 bot = AuctionBot()
@@ -674,7 +690,7 @@ async def start_auction(interaction: discord.Interaction):
 
     await interaction.response.send_message("**AUCTION STARTED!**")
     bot.countdown_channel = interaction.channel
-    await asyncio.sleep(PLAYER_GAP)
+    # First player starts immediately (no delay)
     await start_next_player(interaction.channel)
 
 
@@ -1176,7 +1192,7 @@ async def on_app_command_error(
             ephemeral=True,
         )
     else:
-        print(f"Command error: {error}")
+        logger.error(f"Command error: {error}", exc_info=True)
         if not interaction.response.is_done():
             await interaction.response.send_message(
                 f"An error occurred: {str(error)}", ephemeral=True
@@ -1190,8 +1206,9 @@ async def on_app_command_error(
 if __name__ == "__main__":
     token = BOT_TOKEN or os.getenv("DISCORD_TOKEN")
     if not token:
-        print(
+        logger.critical(
             "Please set your bot token in DISCORD_TOKEN environment variable or config.py"
         )
     else:
+        logger.info("Starting Discord Auction Bot...")
         bot.run(token)
