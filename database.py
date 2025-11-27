@@ -393,6 +393,39 @@ class Database:
             cursor.execute("DELETE FROM player_lists")
             cursor.execute("DELETE FROM list_order")
 
+    def delete_set(self, set_name: str) -> tuple:
+        """Delete a set/list and all its players from the auction"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # Check if set exists
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM list_order WHERE LOWER(list_name) = LOWER(?)",
+                (set_name,),
+            )
+            if cursor.fetchone()["cnt"] == 0:
+                return (False, f"Set '{set_name}' does not exist")
+
+            # Count players that will be deleted
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM player_lists WHERE LOWER(list_name) = LOWER(?)",
+                (set_name,),
+            )
+            player_count = cursor.fetchone()["cnt"]
+
+            # Delete players from set
+            cursor.execute(
+                "DELETE FROM player_lists WHERE LOWER(list_name) = LOWER(?)",
+                (set_name,),
+            )
+
+            # Delete from list_order
+            cursor.execute(
+                "DELETE FROM list_order WHERE LOWER(list_name) = LOWER(?)", (set_name,)
+            )
+
+            return (True, f"Deleted set '{set_name}' with {player_count} players")
+
     # ==================== SET ENABLE/DISABLE OPERATIONS ====================
 
     def enable_sets(self, set_names: List[str]) -> int:
@@ -722,6 +755,208 @@ class Database:
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM sales")
+
+    # ==================== ADDITIONAL OPERATIONS ====================
+
+    def get_auctioned_count(self) -> int:
+        """Get count of auctioned players"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM player_lists WHERE auctioned = 1"
+            )
+            return cursor.fetchone()["cnt"]
+
+    def find_player_by_name(
+        self, player_name: str
+    ) -> Optional[Tuple[int, str, str, Optional[int], int]]:
+        """Find a player by name (case-insensitive partial match).
+        Returns (id, player_name, list_name, base_price, auctioned) or None"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            # Try exact match first
+            cursor.execute(
+                "SELECT id, player_name, list_name, base_price, auctioned FROM player_lists WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return (
+                    row["id"],
+                    row["player_name"],
+                    row["list_name"],
+                    row["base_price"],
+                    row["auctioned"],
+                )
+
+            # Try partial match
+            cursor.execute(
+                "SELECT id, player_name, list_name, base_price, auctioned FROM player_lists WHERE LOWER(player_name) LIKE LOWER(?)",
+                (f"%{player_name}%",),
+            )
+            row = cursor.fetchone()
+            if row:
+                return (
+                    row["id"],
+                    row["player_name"],
+                    row["list_name"],
+                    row["base_price"],
+                    row["auctioned"],
+                )
+            return None
+
+    def reset_player_auctioned_status(self, player_id: int):
+        """Reset a player's auctioned status to 0 (bring back to auction)"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE player_lists SET auctioned = 0 WHERE id = ?", (player_id,)
+            )
+
+    def delete_last_bid(self, player_name: str):
+        """Delete the last bid for a player"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM bid_history WHERE id = (SELECT id FROM bid_history WHERE player_name = ? ORDER BY timestamp DESC LIMIT 1)",
+                (player_name,),
+            )
+
+    def get_previous_bid(self, player_name: str) -> Optional[dict]:
+        """Get the current highest bid after removing the last one"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM bid_history WHERE player_name = ? ORDER BY timestamp DESC LIMIT 1",
+                (player_name,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def trade_player(
+        self, player_name: str, from_team: str, to_team: str, price: int
+    ) -> bool:
+        """Trade a player between teams"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # Check if player exists in source team
+            cursor.execute(
+                "SELECT id, price FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                (from_team, player_name),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            original_price = row["price"]
+
+            # Remove from source team
+            cursor.execute(
+                "DELETE FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                (from_team, player_name),
+            )
+
+            # Refund source team
+            cursor.execute(
+                "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
+                (original_price, from_team),
+            )
+
+            # Add to target team
+            cursor.execute(
+                "INSERT INTO team_squads (team_code, player_name, price) VALUES (?, ?, ?)",
+                (to_team, player_name, price),
+            )
+
+            # Deduct from target team
+            cursor.execute(
+                "UPDATE teams SET purse = purse - ? WHERE team_code = ? AND purse >= ?",
+                (price, to_team, price),
+            )
+
+            return True
+
+    def get_stats_data(self) -> dict:
+        """Get statistics for live display"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # Most expensive player
+            cursor.execute(
+                "SELECT player_name, final_price FROM sales ORDER BY final_price DESC LIMIT 1"
+            )
+            most_expensive = cursor.fetchone()
+
+            # Team with most players
+            cursor.execute(
+                "SELECT team_code, COUNT(*) as cnt FROM team_squads GROUP BY team_code ORDER BY cnt DESC LIMIT 1"
+            )
+            most_players = cursor.fetchone()
+
+            # Team with least players (that has at least 1)
+            cursor.execute(
+                "SELECT team_code, COUNT(*) as cnt FROM team_squads GROUP BY team_code ORDER BY cnt ASC LIMIT 1"
+            )
+            least_players = cursor.fetchone()
+
+            # All purses
+            cursor.execute("SELECT team_code, purse FROM teams ORDER BY team_code")
+            purses = {row["team_code"]: row["purse"] for row in cursor.fetchall()}
+
+            return {
+                "most_expensive": dict(most_expensive) if most_expensive else None,
+                "most_players": dict(most_players) if most_players else None,
+                "least_players": dict(least_players) if least_players else None,
+                "purses": purses,
+            }
+
+    def get_all_unauctioned_players(self) -> List[Tuple[str, str, Optional[int]]]:
+        """Get all unauctioned players with their list and base price"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT player_name, list_name, base_price FROM player_lists WHERE auctioned = 0 ORDER BY list_name, player_name"
+            )
+            return [
+                (row["player_name"], row["list_name"], row["base_price"])
+                for row in cursor.fetchall()
+            ]
+
+    def get_unsold_players(self) -> List[Tuple[int, str, str, Optional[int]]]:
+        """Get all players that were auctioned but not sold (unsold players).
+        Returns list of (id, player_name, list_name, base_price)"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            # Players marked as auctioned but not in any squad
+            cursor.execute(
+                """
+                SELECT pl.id, pl.player_name, pl.list_name, pl.base_price 
+                FROM player_lists pl
+                WHERE pl.auctioned = 1 
+                AND NOT EXISTS (
+                    SELECT 1 FROM team_squads ts 
+                    WHERE LOWER(ts.player_name) = LOWER(pl.player_name)
+                )
+                ORDER BY pl.list_name, pl.player_name
+                """
+            )
+            return [
+                (row["id"], row["player_name"], row["list_name"], row["base_price"])
+                for row in cursor.fetchall()
+            ]
+
+    def reauction_multiple_players(self, player_ids: List[int]) -> int:
+        """Reset auctioned status for multiple players. Returns count of players re-auctioned."""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            count = 0
+            for pid in player_ids:
+                cursor.execute(
+                    "UPDATE player_lists SET auctioned = 0 WHERE id = ?", (pid,)
+                )
+                count += cursor.rowcount
+            return count
 
     # ==================== FULL RESET ====================
 

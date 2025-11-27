@@ -94,18 +94,13 @@ class AuctionManager:
     def _load_ipl_csv(
         self, filepath: str, max_set: Optional[int] = None
     ) -> Tuple[bool, str]:
-        """Robust loader for IPL CSVs with Set Name support"""
+        """Robust loader for IPL CSVs with Set Name support. Supports incremental loading."""
         import csv
 
         try:
+            # Get existing lists to avoid duplicates
             existing_lists = self.db.get_player_lists()
-            if existing_lists:
-                for list_name, players in existing_lists.items():
-                    if players:
-                        return (
-                            True,
-                            f"Players already loaded ({len(existing_lists)} lists exist). Use /clear first to reload.",
-                        )
+            existing_set_names = set(existing_lists.keys()) if existing_lists else set()
 
             players_by_set = {}
             set_number_map = {}  # Stores {list_name: set_number} for sorting
@@ -173,7 +168,9 @@ class AuctionManager:
                     first_name = get_col("First Name", "Firstname", "Player Name")
                     surname = get_col("Surname", "Last Name", "Lastname")
                     set_no_str = get_col("Set No.", "Set No", "SetNo", "Set")
-                    set_name_str = get_col("Set Name", "SetName", "Set Desc", "Definition") 
+                    set_name_str = get_col(
+                        "Set Name", "SetName", "Set Desc", "Definition"
+                    )
                     base_price_str = get_col(
                         "Base Price", "BasePrice", "Base Price (Lakh)", "Baseprice"
                     )
@@ -246,15 +243,26 @@ class AuctionManager:
                             base_price = DEFAULT_BASE_PRICE
 
                     # DETERMINE SET NAME (KEY)
-                    if set_name_str:
+                    # Use 2025 Set column value (like M1, M2, BA1) as set name
+                    set_2025_str = get_col("2025 Set", "2025Set", "2025set")
+                    if set_2025_str:
+                        set_key = set_2025_str.strip()
+                    elif set_name_str:
                         set_key = set_name_str.strip()
                     else:
                         set_key = f"Set {set_number}"
 
+                    # Skip if this set already exists with players
+                    if set_key.lower() in existing_set_names:
+                        skipped_count += 1
+                        continue
+
                     # Group players
                     if set_key not in players_by_set:
                         players_by_set[set_key] = []
-                        set_number_map[set_key] = set_number  # Map name to number for sorting
+                        set_number_map[set_key] = (
+                            set_number  # Map name to number for sorting
+                        )
                         try:
                             self.db.create_list(set_key)
                         except Exception:
@@ -265,9 +273,16 @@ class AuctionManager:
             print(f"\nCSV Parsing Summary:")
             print(f"Total rows read: {row_count}")
             print(f"Rows skipped: {skipped_count}")
-            print(f"Sets found: {len(players_by_set)}")
+            print(f"New sets found: {len(players_by_set)}")
+            print(f"Existing sets skipped: {len(existing_set_names)}")
             if max_set:
                 print(f"Max set filter: 1 to {max_set}")
+
+            if not players_by_set:
+                return (
+                    True,
+                    f"No new sets to load (sets 1-{max_set} already loaded). Use a higher number or /clear to reload.",
+                )
 
             total_players = 0
             for set_name, players in players_by_set.items():
@@ -275,15 +290,32 @@ class AuctionManager:
                 total_players += len(players)
                 print(f"  {set_name}: {len(players)} players")
 
-            # Sort lists by the extracted Set Number
+            # Update list order to include new sets (merge with existing)
             if players_by_set:
-                list_order = sorted(players_by_set.keys(), key=lambda k: set_number_map.get(k, 999))
-                self.db.set_list_order(list_order)
+                # Get existing order
+                existing_order = self.db.get_list_order()
+                existing_order_set = set(existing_order)
+
+                # Add new sets sorted by their set number
+                new_sets_sorted = sorted(
+                    players_by_set.keys(), key=lambda k: set_number_map.get(k, 999)
+                )
+
+                # Merge: keep existing order, append new sets
+                final_order = existing_order + [
+                    s for s in new_sets_sorted if s.lower() not in existing_order_set
+                ]
+                self.db.set_list_order(final_order)
 
             max_set_msg = f" (sets 1-{max_set})" if max_set else ""
+            existing_msg = (
+                f" ({len(existing_set_names)} existing sets kept)"
+                if existing_set_names
+                else ""
+            )
             return (
                 True,
-                f"Loaded {total_players} players from {len(players_by_set)} sets{max_set_msg}",
+                f"Loaded {total_players} players from {len(players_by_set)} NEW sets{max_set_msg}{existing_msg}",
             )
 
         except FileNotFoundError:
@@ -328,7 +360,7 @@ class AuctionManager:
             countdown_seconds=self.countdown_seconds,
             last_bid_time=self.last_bid_time,
             stats_channel_id=self.stats_channel_id,
-            stats_message_id=self.stats_message_id
+            stats_message_id=self.stats_message_id,
         )
 
     @property
@@ -398,6 +430,11 @@ class AuctionManager:
 
     def get_list_info(self) -> str:
         return self.formatter.format_list_display(self.player_lists, self.list_order)
+
+    def delete_set(self, set_name: str) -> Tuple[bool, str]:
+        """Delete a set/list and all its players from the auction"""
+        set_name_lower = set_name.lower()
+        return self.db.delete_set(set_name_lower)
 
     # ==================== AUCTION CONTROL ====================
 
@@ -482,7 +519,7 @@ class AuctionManager:
                     if pname.lower() == self.current_player.lower():
                         is_sold = True
                         break
-            
+
             if not is_sold:
                 # Player is active but not sold - just continue with them
                 return (True, self.current_player, self.base_price, False)
@@ -491,16 +528,16 @@ class AuctionManager:
                 self._reset_player_state()
 
         list_order = self.db.get_list_order()
-        
+
         auctioned_count = self.db.get_auctioned_count()
-        is_start_of_auction = (auctioned_count == 0)
+        is_start_of_auction = auctioned_count == 0
 
         old_list_index = self.current_list_index
         list_advanced = False
 
         while self.current_list_index < len(list_order):
             current_list = list_order[self.current_list_index]
-            
+
             if self.current_list_index > old_list_index:
                 list_advanced = True
 
@@ -551,11 +588,21 @@ class AuctionManager:
         is_auto: bool = False,
     ) -> BidResult:
 
-        if not self.active or self.paused:
+        if not self.active:
             return BidResult(False, "Auction is not active")
+
+        if self.paused:
+            return BidResult(False, "Auction is paused - bidding not allowed")
 
         if not self.current_player:
             return BidResult(False, "No player is currently being auctioned")
+
+        # CRITICAL: Check if player is already sold (prevents double-sell bug)
+        squads = self.db.get_all_squads()
+        for squad in squads.values():
+            for pname, _ in squad:
+                if pname.lower() == self.current_player.lower():
+                    return BidResult(False, "This player has already been sold")
 
         team_upper = team.upper()
         teams = self.db.get_teams()
@@ -603,57 +650,70 @@ class AuctionManager:
             auto_bids_triggered=auto_bids_triggered,
             original_bid_amount=min_bid,
         )
-        
+
     def undo_last_bid(self) -> Tuple[bool, str]:
         """Undo the last bid on the current player"""
         if not self.active or not self.current_player:
             return False, "No active player auction."
-            
+
         # Get history
         history = self.db.get_bid_history_for_player(self.current_player)
         if not history:
             return False, "No bids to undo."
-            
+
         # Remove last bid
         self.db.delete_last_bid(self.current_player)
-        
+
         # Get new state
         previous = self.db.get_previous_bid(self.current_player)
-        
+
         if previous:
-            self.current_bid = previous['amount']
-            self.highest_bidder = previous['team_code']
-            self.last_bid_time = previous['timestamp']
+            self.current_bid = previous["amount"]
+            self.highest_bidder = previous["team_code"]
+            self.last_bid_time = previous["timestamp"]
         else:
             # Back to base price
             self.current_bid = self.base_price
             self.highest_bidder = None
             self.last_bid_time = time.time()
-            
+
         self._save_state_to_db()
-        return True, f"Undo successful. Current bid: {format_amount(self.current_bid)} by {self.highest_bidder or 'None'}"
+        return (
+            True,
+            f"Undo successful. Current bid: {format_amount(self.current_bid)} by {self.highest_bidder or 'None'}",
+        )
 
     # ==================== TRADING & MANUAL ====================
-    def trade_player(self, player_name: str, from_team: str, to_team: str, price: int) -> Tuple[bool, str]:
+    def trade_player(
+        self, player_name: str, from_team: str, to_team: str, price: int
+    ) -> Tuple[bool, str]:
         """Trade player between teams"""
-        success = self.db.trade_player(player_name, from_team.upper(), to_team.upper(), price)
+        success = self.db.trade_player(
+            player_name, from_team.upper(), to_team.upper(), price
+        )
         if success:
-            return True, f"Traded **{player_name}** from **{from_team}** to **{to_team}** for {format_amount(price)}"
+            return (
+                True,
+                f"Traded **{player_name}** from **{from_team}** to **{to_team}** for {format_amount(price)}",
+            )
         return False, "Trade failed. Check if player exists in source team."
 
     def manual_add_player(self, team: str, player: str, price: int) -> Tuple[bool, str]:
         """Manually add a player to a squad"""
         team_upper = team.upper()
         teams = self.db.get_teams()
-        
+
         if team_upper not in teams:
             return False, "Invalid team."
-            
+
         if not self.db.deduct_from_purse(team_upper, price):
-             return False, "Insufficient purse."
-             
+            return False, "Insufficient purse."
+
         self.db.add_to_squad(team_upper, player, price)
-        return True, f"Added **{player}** to **{team_upper}** for {format_amount(price)}"
+        return (
+            True,
+            f"Added **{player}** to **{team_upper}** for {format_amount(price)}",
+        )
 
     # ==================== AUTO-BID (PROXY BIDDING) ====================
 
@@ -805,26 +865,26 @@ class AuctionManager:
         # For auctioned players, salary is their sold price.
         current_purse = teams[team_upper]
         new_purse = current_purse + salary
-        
+
         # 1. Update Purse
         self.db.update_team_purse(team_upper, new_purse)
 
-        # 2. Remove from Squad (Deleting from `team_squads` via DB call if I had one, 
+        # 2. Remove from Squad (Deleting from `team_squads` via DB call if I had one,
         # but I'll use a direct query via a new DB method or reuse logic)
         # Actually, let's implement a specific DB method for removal to be safe.
-        # For now, we can use trade_player logic or manual deletion. 
+        # For now, we can use trade_player logic or manual deletion.
         # Let's add a direct delete query here since we are in Manager.
-        
+
         with self.db._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "DELETE FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
-                (team_upper, player_name)
+                (team_upper, player_name),
             )
             # Also delete from sales if present
             cursor.execute(
                 "DELETE FROM sales WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
-                (team_upper, player_name)
+                (team_upper, player_name),
             )
 
         # 3. Add to auction pool
@@ -855,6 +915,7 @@ class AuctionManager:
                 if pname.lower() == player.lower():
                     # Player is already in a squad, probably from a previous run or race condition
                     self._reset_player_state()
+                    self._save_state_to_db()  # Persist the cleared state
                     return False, None, 0
 
         if team:
@@ -871,12 +932,16 @@ class AuctionManager:
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
                 unauctioned = self.db.get_all_unauctioned_players()
-                
+
                 self.file_manager.regenerate_excel_from_db(
                     self.excel_file, sales, teams, squads, unauctioned
                 )
             except Exception as e:
                 print(f"Error saving to Excel: {e}")
+
+            # CRITICAL: Clear player state AFTER successful sale to prevent double-sell
+            self._reset_player_state()
+            self._save_state_to_db()
 
             return True, team, amount
 
@@ -903,20 +968,20 @@ class AuctionManager:
 
     def rollback_last_sale(self) -> Optional[dict]:
         sale = self.db.rollback_last_sale()
-        
+
         if sale:
             try:
                 teams = self.db.get_teams()
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
                 unauctioned = self.db.get_all_unauctioned_players()
-                
+
                 self.file_manager.regenerate_excel_from_db(
                     self.excel_file, sales, teams, squads, unauctioned
                 )
             except Exception as e:
                 print(f"Error updating Excel on rollback: {e}")
-        
+
         return sale
 
     def clear_all_data(self):
@@ -951,29 +1016,29 @@ class AuctionManager:
 
     def get_stats_message(self) -> str:
         data = self.db.get_stats_data()
-        
+
         msg = "**📊 LIVE AUCTION STATS**\n\n"
-        
-        if data['most_expensive']:
+
+        if data["most_expensive"]:
             msg += f"💰 **Most Expensive:** {data['most_expensive']['player_name']} - {format_amount(data['most_expensive']['final_price'])}\n"
         else:
             msg += "💰 **Most Expensive:** None\n"
-            
-        if data['most_players']:
+
+        if data["most_players"]:
             msg += f"📈 **Most Players:** {data['most_players']['team_code']} ({data['most_players']['cnt']})\n"
         else:
             msg += "📈 **Most Players:** None\n"
-            
-        if data['least_players']:
+
+        if data["least_players"]:
             msg += f"📉 **Least Players:** {data['least_players']['team_code']} ({data['least_players']['cnt']})\n"
         else:
             msg += "📉 **Least Players:** None\n"
-            
+
         msg += "\n**💳 Team Purses:**\n```\n"
-        for team, purse in data['purses'].items():
+        for team, purse in data["purses"].items():
             msg += f"{team:6}: {format_amount(purse)}\n"
         msg += "```"
-        
+
         return msg
 
     def get_status_display(self) -> str:
@@ -1001,6 +1066,7 @@ class AuctionManager:
             status += f"Auto-bids Active: {', '.join(auto_bids.keys())}\n"
 
         return status
+
 
 class AuctionState:
     pass
