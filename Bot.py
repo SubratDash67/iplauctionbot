@@ -52,15 +52,11 @@ class AuctionBot(commands.Bot):
         print(f"Logged in as {self.user.name} (ID: {self.user.id})")
         print("Bot is ready! Use /help to see all commands.")
 
-        # CRITICAL: Load user-team assignments from database (persistence fix)
-        self.user_teams = self.auction_manager.db.get_all_user_teams()
-        print(f"Loaded {len(self.user_teams)} user-team assignments from database.")
-
         # ZOMBIE STATE FIX: Handle crash/restart during active auction
         if self.auction_manager.active and not self.auction_manager.paused:
             print("⚠️  WARNING: Auction was active before restart.")
-            print("⚠️  Marking as paused for safety. Admin must /resume to continue.")
-            self.auction_manager.paused = True
+            print("⚠️  Marking as inactive for safety. Admin must /start to resume.")
+            self.auction_manager.active = False
             self.auction_manager._save_state_to_db()
 
 
@@ -87,8 +83,6 @@ async def assign_team(interaction: discord.Interaction, user: discord.User, team
         )
         return
 
-    # Persist to database AND update memory
-    bot.auction_manager.db.set_user_team(user.id, team_upper, user.display_name)
     bot.user_teams[user.id] = team_upper
     await interaction.response.send_message(
         f"**{user.display_name}** is now assigned to **{team_upper}**"
@@ -104,8 +98,6 @@ async def unassign_team(interaction: discord.Interaction, user: discord.User):
     """Remove a user's team assignment"""
     if user.id in bot.user_teams:
         team = bot.user_teams.pop(user.id)
-        # Remove from database as well
-        bot.auction_manager.db.remove_user_team(user.id)
         await interaction.response.send_message(
             f"**{user.display_name}** removed from **{team}**"
         )
@@ -264,22 +256,6 @@ async def rollback_sale(interaction: discord.Interaction):
         msg += f"Player: **{result['player_name']}**\n"
         msg += f"Team: **{result['team_code']}**\n"
         msg += f"Amount refunded: {format_amount(result['amount'])}\n"
-
-        # Regenerate Excel from DB to keep in sync
-        try:
-            from utils import FileManager
-
-            all_sales = bot.auction_manager.db.get_all_sales()
-            FileManager.regenerate_excel_from_db(
-                "auction_results.xlsx",
-                all_sales,
-                bot.auction_manager.teams,
-                bot.auction_manager.team_squads,
-            )
-            msg += "Excel file updated."
-        except Exception as e:
-            msg += f"\n⚠️ Excel update failed: {e}"
-
         await interaction.response.send_message(msg)
     else:
         await interaction.response.send_message(
@@ -324,18 +300,16 @@ async def sold_to(interaction: discord.Interaction, team: str):
         await interaction.response.send_message(f"Invalid team: {team}", ephemeral=True)
         return
 
-    # Store player name before any state changes
-    player_name = bot.auction_manager.current_player
-
-    # Set highest bidder and SAVE TO DB before finalize_sale
+    # Set highest bidder if there's a current bid
     if bot.auction_manager.current_bid > 0:
         bot.auction_manager.highest_bidder = team_upper
-        bot.auction_manager._save_state_to_db()  # Critical: save to DB
 
     success, winning_team, amount = bot.auction_manager.finalize_sale()
 
     if success:
-        sold_msg = bot.formatter.format_sold_message(player_name, winning_team, amount)
+        sold_msg = bot.formatter.format_sold_message(
+            bot.auction_manager.current_player, winning_team, amount
+        )
         await interaction.response.send_message(sold_msg)
         await interaction.channel.send(bot.auction_manager.get_purse_display())
 
@@ -367,22 +341,21 @@ async def mark_unsold(interaction: discord.Interaction):
     await start_next_player(interaction.channel)
 
 
-@bot.tree.command(
-    name="reauction", description="Add an unsold player back to auction (Admin only)"
-)
-@app_commands.describe(
-    player_name="Name of the player to re-auction (uses original base price from CSV)"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def reauction_player(interaction: discord.Interaction, player_name: str):
-    """Add an unsold player back to the auction pool at their original base price"""
-    success, message = bot.auction_manager.reauction_player(player_name)
-    await interaction.response.send_message(message, ephemeral=not success)
-
-
 # ============================================================
 # LIST MANAGEMENT COMMANDS
 # ============================================================
+
+
+@bot.tree.command(name="createlist", description="Create a new player list")
+@app_commands.describe(name="Name of the list to create")
+async def create_list(interaction: discord.Interaction, name: str):
+    """Create a new player list"""
+    if bot.auction_manager.create_list(name):
+        await interaction.response.send_message(f"Created list: **{name}**")
+    else:
+        await interaction.response.send_message(
+            f"List **{name}** already exists.", ephemeral=True
+        )
 
 
 @bot.tree.command(name="addplayer", description="Add a player to a list")
@@ -412,29 +385,6 @@ async def load_csv(interaction: discord.Interaction, list_name: str, filepath: s
     # Strip quotes from filepath if present
     filepath = filepath.strip().strip('"').strip("'")
     success, message = bot.auction_manager.load_list_from_csv(list_name, filepath)
-    await interaction.followup.send(message)
-
-
-@bot.tree.command(
-    name="loadsets", description="Load players from IPL CSV by set number (Admin only)"
-)
-@app_commands.describe(max_set="Load players from sets 1 to this number (1-79)")
-@app_commands.checks.has_permissions(administrator=True)
-async def load_sets(interaction: discord.Interaction, max_set: int):
-    """Load players from the IPL auction CSV file, filtering by set number.
-
-    Example: /loadsets 10 will load all players from sets 1 through 10.
-    The CSV must have a 'Set No.' column with values 1-79.
-    """
-    await interaction.response.defer()
-
-    if max_set < 1 or max_set > 79:
-        await interaction.followup.send(
-            "max_set must be between 1 and 79", ephemeral=True
-        )
-        return
-
-    success, message = bot.auction_manager.load_players_from_sets(max_set)
     await interaction.followup.send(message)
 
 
@@ -641,9 +591,9 @@ async def help_command(interaction: discord.Interaction):
 `/myteam` - Check your team
 
 **List Management:**
-`/loadsets max_set` - Load IPL players from sets 1 to max_set (1-79)
-`/addplayer list player` - Add player manually
-`/loadcsv list filepath` - Load from custom CSV
+`/createlist name` - Create player list
+`/addplayer list player` - Add player
+`/loadcsv list filepath` - Load from CSV
 `/showlists` - Display all lists
 `/setorder lists` - Set auction order
 
@@ -654,7 +604,6 @@ async def help_command(interaction: discord.Interaction):
 `/resume` - Resume auction
 `/soldto TEAM` - Manually finalize sale to team
 `/unsold` - Mark player unsold
-`/reauction player` - Re-auction unsold player (uses original base price)
 `/clear` - Clear all data
 
 **Bidding:**
@@ -731,16 +680,8 @@ async def countdown_loop(channel: discord.TextChannel):
 
         now = time_module.time()
 
-        # CRITICAL: Reload state from DB to ensure we have the latest highest_bidder
-        # This prevents race conditions where bids update DB but we read stale memory
-        bot.auction_manager._load_state_from_db()
-
-        # Store current player name for this iteration (in case state changes)
-        current_player_name = bot.auction_manager.current_player
-
-        # Check if any bid has been placed - use highest_bidder instead of comparing prices
-        # Since first bid is now at base price, we can't compare current_bid > base_price
-        if bot.auction_manager.highest_bidder is not None:
+        # Check if any bid has been placed
+        if bot.auction_manager.current_bid > bot.auction_manager.base_price:
             first_bid_placed = True
 
         if not first_bid_placed:
@@ -751,7 +692,7 @@ async def countdown_loop(channel: discord.TextChannel):
             if remaining <= 0:
                 # No bids in 60 seconds - mark unsold
                 await channel.send(
-                    f"⏰ No bids in {NO_START_TIMEOUT}s - Player **{current_player_name}** goes UNSOLD"
+                    f"⏰ No bids in {NO_START_TIMEOUT}s - Player **{bot.auction_manager.current_player}** goes UNSOLD"
                 )
                 await asyncio.sleep(2)
                 asyncio.create_task(start_next_player(channel))
@@ -786,19 +727,18 @@ async def countdown_loop(channel: discord.TextChannel):
                     except:
                         pass
 
-                # Store player name BEFORE finalize_sale (which may modify state)
-                player_name = bot.auction_manager.current_player
-
                 success, team, amount = bot.auction_manager.finalize_sale()
 
                 if success:
                     sold_msg = bot.formatter.format_sold_message(
-                        player_name, team, amount
+                        bot.auction_manager.current_player, team, amount
                     )
                     await channel.send(sold_msg)
                     await channel.send(bot.auction_manager.get_purse_display())
                 else:
-                    await channel.send(f"Player **{player_name}** went UNSOLD.")
+                    await channel.send(
+                        f"Player **{bot.auction_manager.current_player}** went UNSOLD."
+                    )
 
                 await asyncio.sleep(2)
                 asyncio.create_task(start_next_player(channel))

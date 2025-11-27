@@ -84,39 +84,34 @@ class AuctionManager:
         self._auto_load_csv_players()
 
     def _initialize_retained_players(self):
-        """Add retained players to team squads (only if not already added)"""
-        existing_squads = self.db.get_all_squads()
-
+        """Add retained players to team squads"""
         for team_code, players in RETAINED_PLAYERS.items():
-            # Get existing players for this team (lowercase for comparison)
-            existing_players = set()
-            if team_code in existing_squads:
-                existing_players = {
-                    name.lower() for name, _ in existing_squads[team_code]
-                }
-
             for player_name, salary in players:
-                # Only add if not already in squad
-                if player_name.lower() not in existing_players:
-                    self.db.add_to_squad(team_code, player_name, salary)
+                self.db.add_to_squad(team_code, player_name, salary)
 
     def _auto_load_csv_players(self):
-        """Auto-load players from default CSV file - DISABLED, admin must use /loadsets command"""
-        # Auto-loading disabled - admin should manually load sets using /loadsets command
-        # This gives admin control over which sets to include in the auction
-        pass
+        """Auto-load players from default CSV file"""
+        import os
 
-    def _load_ipl_csv(
-        self, filepath: str, max_set: Optional[int] = None
-    ) -> Tuple[bool, str]:
+        csv_path = os.path.join(os.path.dirname(__file__), DEFAULT_CSV_FILE)
+        if os.path.exists(csv_path):
+            try:
+                success, msg = self._load_ipl_csv(csv_path)
+                if success:
+                    print(f"✅ Auto-loaded players from CSV: {msg}")
+                else:
+                    print(f"⚠️  CSV load warning: {msg}")
+            except Exception as e:
+                print(f"⚠️  Could not auto-load CSV: {e}")
+
+    def _load_ipl_csv(self, filepath: str) -> Tuple[bool, str]:
         """Robust loader for messy IPL CSVs.
 
         - Detects and uses the real header row (handles repeated header blocks)
         - Normalizes header names and builds index map
         - Skips junk rows and repeated headers
         - Parses Base Price robustly (handles '200', '150', '30', 'Rs 200', '₹200', commas)
-        - Groups players by set number and writes to DB
-        - max_set: If provided, only load players from sets 1 to max_set (inclusive)
+        - Groups players by set and writes to DB
         """
         import csv
 
@@ -126,10 +121,7 @@ class AuctionManager:
             if existing_lists:
                 for list_name, players in existing_lists.items():
                     if players:
-                        return (
-                            True,
-                            f"Players already loaded ({len(existing_lists)} lists exist). Use /clear first to reload.",
-                        )
+                        return True, f"Players already loaded ({len(existing_lists)} lists exist)"
 
             players_by_set = {}
             row_count = 0
@@ -154,11 +146,7 @@ class AuctionManager:
                     if header is None:
                         low_cells = [c.lower() for c in row if c]
                         # Look for signs of the real header
-                        if (
-                            any("first name" in c for c in low_cells)
-                            or any("list sr" in c for c in low_cells)
-                            or any("2025 set" in c for c in low_cells)
-                        ):
+                        if any("first name" in c for c in low_cells) or any("list sr" in c for c in low_cells) or any("2025 set" in c for c in low_cells):
                             header = row
                             # Build normalized header -> index map
                             for i, col in enumerate(header):
@@ -177,17 +165,7 @@ class AuctionManager:
 
                     # If header already found, skip repeated header lines (some files repeat headers)
                     first_cell = row[0].lower() if row and row[0] else ""
-                    if any(
-                        h in first_cell
-                        for h in (
-                            "list sr.no",
-                            "list sr.no.",
-                            "list sr",
-                            "first name",
-                            "tata ipl",
-                            "auction list",
-                        )
-                    ):
+                    if any(h in first_cell for h in ("list sr.no", "list sr.no.", "list sr", "first name", "tata ipl", "auction list")):
                         skipped_count += 1
                         continue
 
@@ -202,19 +180,9 @@ class AuctionManager:
 
                     first_name = get_col("First Name", "Firstname", "Player Name")
                     surname = get_col("Surname", "Last Name", "Lastname")
-                    # Use "Set No." column which has simple numbers 1-79
-                    set_no_str = get_col("Set No.", "Set No", "SetNo", "Set")
-                    base_price_str = get_col(
-                        "Base Price", "BasePrice", "Base Price (Lakh)", "Baseprice"
-                    )
-                    list_sr_no = get_col(
-                        "List Sr.No.",
-                        "List Sr.No",
-                        "List Sr No",
-                        "ListSrNo",
-                        "Sr.No.",
-                        "Sr. No.",
-                    )
+                    set_name = get_col("2025 Set", "2025Set", "Set No.", "Set")
+                    base_price_str = get_col("Base Price", "BasePrice", "Base Price (Lakh)", "Baseprice")
+                    list_sr_no = get_col("List Sr.No.", "List Sr.No", "List Sr No", "ListSrNo", "Sr.No.", "Sr. No.")
 
                     # Skip rows missing essential fields
                     if not first_name:
@@ -223,11 +191,7 @@ class AuctionManager:
 
                     # Filter out header-like rows within data (e.g. stray header repeated)
                     fn_lower = first_name.lower()
-                    if (
-                        fn_lower in ("first name", "player name", "name")
-                        or "tata ipl" in fn_lower
-                        or "auction list" in fn_lower
-                    ):
+                    if fn_lower in ("first name", "player name", "name") or "tata ipl" in fn_lower or "auction list" in fn_lower:
                         skipped_count += 1
                         continue
 
@@ -236,20 +200,8 @@ class AuctionManager:
                         skipped_count += 1
                         continue
 
-                    # set_no_str required and must be numeric
-                    if not set_no_str:
-                        skipped_count += 1
-                        continue
-
-                    # Parse set number
-                    try:
-                        set_number = int(float(set_no_str.replace(",", "")))
-                    except (ValueError, TypeError):
-                        skipped_count += 1
-                        continue
-
-                    # Filter by max_set if provided
-                    if max_set is not None and set_number > max_set:
+                    # set_name required
+                    if not set_name:
                         skipped_count += 1
                         continue
 
@@ -285,13 +237,13 @@ class AuctionManager:
                             # fallback to default
                             base_price = DEFAULT_BASE_PRICE
 
-                    # register player into players_by_set using set number as key
-                    set_key = f"set_{set_number}"
+                    # register player into players_by_set
+                    set_key = set_name.strip()
                     if set_key not in players_by_set:
                         players_by_set[set_key] = []
-                        # create DB list lazily
+                        # create DB list lazily (lowercased as your code expects)
                         try:
-                            self.db.create_list(set_key)
+                            self.db.create_list(set_key.lower())
                         except Exception:
                             pass
 
@@ -302,33 +254,21 @@ class AuctionManager:
             print(f"Total rows read: {row_count}")
             print(f"Rows skipped: {skipped_count}")
             print(f"Sets found: {len(players_by_set)}")
-            if max_set:
-                print(f"Max set filter: 1 to {max_set}")
 
             # Add all players to their sets in DB
             total_players = 0
             for set_name, players in players_by_set.items():
-                self.db.add_players_to_list(set_name, players)
+                # save lower-case list name to DB to match other uses
+                self.db.add_players_to_list(set_name.lower(), players)
                 total_players += len(players)
                 print(f"  {set_name}: {len(players)} players")
 
-            # If we found some sets, set numeric order (set_1, set_2, ..., set_N)
+            # If we found some sets, set an alphabetical default order
             if players_by_set:
-                # Sort numerically by extracting the number from "set_X"
-                def get_set_num(s):
-                    try:
-                        return int(s.replace("set_", ""))
-                    except:
-                        return 999
+                list_order = sorted(players_by_set.keys(), key=lambda x: x.lower())
+                self.db.set_list_order([s.lower() for s in list_order])
 
-                list_order = sorted(players_by_set.keys(), key=get_set_num)
-                self.db.set_list_order(list_order)
-
-            max_set_msg = f" (sets 1-{max_set})" if max_set else ""
-            return (
-                True,
-                f"Loaded {total_players} players from {len(players_by_set)} sets{max_set_msg}",
-            )
+            return True, f"Loaded {total_players} players from {len(players_by_set)} sets"
 
         except FileNotFoundError:
             return False, f"CSV file not found: {filepath}"
@@ -351,13 +291,8 @@ class AuctionManager:
         self.highest_bidder = state.get("highest_bidder")
         self.countdown_seconds = state.get("countdown_seconds", DEFAULT_COUNTDOWN)
 
-        # Load last_bid_time from DB (persisted for timer consistency)
-        db_last_bid_time = state.get("last_bid_time", 0)
-        if db_last_bid_time and db_last_bid_time > 0:
-            self.last_bid_time = db_last_bid_time
-        else:
-            self.last_bid_time = time.time()
-
+        # Runtime state (not persisted) - Use timestamp instead of counter
+        self.last_bid_time = time.time()
         self.countdown_remaining = self.countdown_seconds
 
     def _save_state_to_db(self):
@@ -371,7 +306,6 @@ class AuctionManager:
             current_bid=self.current_bid,
             highest_bidder=self.highest_bidder,
             countdown_seconds=self.countdown_seconds,
-            last_bid_time=self.last_bid_time,
         )
 
     @property
@@ -420,31 +354,6 @@ class AuctionManager:
             return True, f"Loaded {len(players)} players into {list_name}"
         except Exception as e:
             return False, str(e)
-
-    def load_players_from_sets(
-        self, max_set: int, filepath: str = None
-    ) -> Tuple[bool, str]:
-        """Load players from the IPL CSV file, filtering by set number.
-
-        Args:
-            max_set: Load players from sets 1 to max_set (inclusive)
-            filepath: Optional path to CSV file. Uses default if not provided.
-
-        Returns:
-            Tuple of (success, message)
-        """
-        import os
-
-        if filepath is None:
-            filepath = os.path.join(os.path.dirname(__file__), DEFAULT_CSV_FILE)
-
-        if not os.path.exists(filepath):
-            return False, f"CSV file not found: {filepath}"
-
-        if max_set < 1 or max_set > 79:
-            return False, "max_set must be between 1 and 79"
-
-        return self._load_ipl_csv(filepath, max_set=max_set)
 
     def set_list_order(self, order: List[str]) -> Tuple[bool, str]:
         """Set custom order for lists"""
@@ -600,13 +509,7 @@ class AuctionManager:
             return BidResult(False, "Invalid team name")
 
         # Calculate minimum valid bid
-        # First bid is at base price, subsequent bids add increment
-        if self.highest_bidder is None:
-            # No bids yet - first bid is at base price
-            min_bid = self.base_price
-        else:
-            # Subsequent bids add increment to current bid
-            min_bid = self.current_bid + get_bid_increment(self.current_bid)
+        min_bid = self.current_bid + get_bid_increment(self.current_bid)
 
         # Check purse
         if teams[team_upper] < min_bid:
@@ -750,53 +653,6 @@ class AuctionManager:
 
         return auto_bids_triggered
 
-    # ==================== RE-AUCTION UNSOLD PLAYERS ====================
-
-    def reauction_player(self, player_name: str) -> Tuple[bool, str]:
-        """Add an unsold player back to auction pool at their original base price.
-
-        Args:
-            player_name: Name of the player to re-auction (searches for match)
-
-        Returns:
-            Tuple of (success, message)
-        """
-        # Find the player in the database
-        player_data = self.db.find_player_by_name(player_name)
-
-        if not player_data:
-            return False, f"Player **{player_name}** not found in auction database."
-
-        player_id, actual_name, list_name, base_price, auctioned = player_data
-
-        if auctioned == 0:
-            return (
-                False,
-                f"**{actual_name}** is already in the auction pool (not yet auctioned).",
-            )
-
-        # Check if player was sold (in a squad)
-        squads = self.db.get_all_squads()
-        for team, squad in squads.items():
-            for name, _ in squad:
-                if name.lower() == actual_name.lower():
-                    return (
-                        False,
-                        f"**{actual_name}** was already sold to **{team}**. Use /rollback to undo the sale first.",
-                    )
-
-        # Use original base price from CSV
-        if base_price is None:
-            base_price = DEFAULT_BASE_PRICE
-
-        # Reset the player's auctioned status so they can be auctioned again
-        self.db.reset_player_auctioned_status(player_id)
-
-        return (
-            True,
-            f"**{actual_name}** has been added back to auction in **{list_name}** with base price {format_amount(base_price)}",
-        )
-
     # ==================== RETAINED PLAYERS ====================
 
     def release_retained_player(self, team: str, player_name: str) -> Tuple[bool, str]:
@@ -853,9 +709,6 @@ class AuctionManager:
 
     def finalize_sale(self) -> Tuple[bool, Optional[str], int]:
         """Finalize the sale of current player"""
-        # CRITICAL: Reload state from DB to ensure we have latest highest_bidder
-        self._load_state_from_db()
-
         if not self.current_player:
             return False, None, 0
 

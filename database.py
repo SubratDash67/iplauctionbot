@@ -103,19 +103,10 @@ class Database:
                     current_bid INTEGER DEFAULT 0,
                     highest_bidder TEXT,
                     countdown_seconds INTEGER DEFAULT 15,
-                    extensions_used INTEGER DEFAULT 0,
-                    last_bid_time REAL DEFAULT 0
+                    extensions_used INTEGER DEFAULT 0
                 )
             """
             )
-
-            # Add last_bid_time column if it doesn't exist (for existing databases)
-            try:
-                cursor.execute(
-                    "ALTER TABLE auction_state ADD COLUMN last_bid_time REAL DEFAULT 0"
-                )
-            except sqlite3.OperationalError:
-                pass  # Column already exists
 
             # Initialize auction state if not exists
             cursor.execute(
@@ -384,54 +375,6 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE player_lists SET auctioned = 1 WHERE id = ?", (player_id,)
-            )
-
-    def find_player_by_name(
-        self, player_name: str
-    ) -> Optional[Tuple[int, str, str, Optional[int], int]]:
-        """Find a player by name (case-insensitive partial match).
-
-        Returns: (id, player_name, list_name, base_price, auctioned) or None
-        """
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            # Try exact match first
-            cursor.execute(
-                "SELECT id, player_name, list_name, base_price, auctioned FROM player_lists WHERE LOWER(player_name) = LOWER(?)",
-                (player_name,),
-            )
-            row = cursor.fetchone()
-            if row:
-                return (
-                    row["id"],
-                    row["player_name"],
-                    row["list_name"],
-                    row["base_price"],
-                    row["auctioned"],
-                )
-
-            # Try partial match
-            cursor.execute(
-                "SELECT id, player_name, list_name, base_price, auctioned FROM player_lists WHERE LOWER(player_name) LIKE LOWER(?)",
-                (f"%{player_name}%",),
-            )
-            row = cursor.fetchone()
-            if row:
-                return (
-                    row["id"],
-                    row["player_name"],
-                    row["list_name"],
-                    row["base_price"],
-                    row["auctioned"],
-                )
-            return None
-
-    def reset_player_auctioned_status(self, player_id: int):
-        """Reset a player's auctioned status to 0 (not auctioned)"""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE player_lists SET auctioned = 0 WHERE id = ?", (player_id,)
             )
 
     def clear_player_lists(self):
