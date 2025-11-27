@@ -418,6 +418,92 @@ async def set_order(interaction: discord.Interaction, lists: str):
 
 
 # ============================================================
+# SET MANAGEMENT COMMANDS (Enable/Disable sets for incremental auction)
+# ============================================================
+
+
+@bot.tree.command(
+    name="loadsets", description="Enable specific sets for auction (Admin only)"
+)
+@app_commands.describe(
+    set_numbers="Set numbers to enable, separated by spaces (e.g., '1 2 3' or '1-5')"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def load_sets(interaction: discord.Interaction, set_numbers: str):
+    """Enable specific sets for auction. Use numbers like '1 2 3' or ranges like '1-5'"""
+    import re
+
+    # Parse set numbers - handle both "1 2 3" and "1-5" formats
+    numbers = []
+    parts = set_numbers.split()
+
+    for part in parts:
+        if "-" in part:
+            # Range like "1-5"
+            try:
+                start, end = part.split("-")
+                numbers.extend(range(int(start), int(end) + 1))
+            except ValueError:
+                await interaction.response.send_message(
+                    f"Invalid range format: {part}. Use format like '1-5'",
+                    ephemeral=True,
+                )
+                return
+        else:
+            # Single number
+            try:
+                numbers.append(int(part))
+            except ValueError:
+                await interaction.response.send_message(
+                    f"Invalid number: {part}", ephemeral=True
+                )
+                return
+
+    if not numbers:
+        await interaction.response.send_message(
+            "Please provide set numbers. Example: `/loadsets 1 2 3` or `/loadsets 1-5`",
+            ephemeral=True,
+        )
+        return
+
+    success, message = bot.auction_manager.enable_sets_for_auction(numbers)
+
+    if success:
+        await interaction.response.send_message(f"✅ {message}")
+
+        # If auction was paused waiting for sets, offer to resume
+        if bot.auction_manager.active and bot.auction_manager.paused:
+            await interaction.followup.send(
+                "Auction is paused. Use `/resume` to continue with the new sets."
+            )
+    else:
+        await interaction.response.send_message(f"❌ {message}", ephemeral=True)
+
+
+@bot.tree.command(
+    name="setstatus",
+    description="Show status of all sets (enabled/disabled, remaining players)",
+)
+async def set_status(interaction: discord.Interaction):
+    """Show the status of all sets"""
+    status = bot.auction_manager.get_sets_status()
+    await interaction.response.send_message(status)
+
+
+@bot.tree.command(name="disablesets", description="Disable all sets (Admin only)")
+@app_commands.checks.has_permissions(administrator=True)
+async def disable_sets(interaction: discord.Interaction):
+    """Disable all sets - use before enabling a new batch"""
+    bot.auction_manager.db.disable_all_sets()
+    # Reset list index
+    bot.auction_manager.current_list_index = 0
+    bot.auction_manager._save_state_to_db()
+    await interaction.response.send_message(
+        "✅ All sets disabled. Use `/loadsets` to enable sets."
+    )
+
+
+# ============================================================
 # AUCTION CONTROL COMMANDS
 # ============================================================
 
@@ -426,12 +512,26 @@ async def set_order(interaction: discord.Interaction, lists: str):
 @app_commands.checks.has_permissions(administrator=True)
 async def start_auction(interaction: discord.Interaction):
     """Start the auction"""
+    # Check if any sets are enabled
+    enabled_sets = bot.auction_manager.db.get_enabled_sets()
+    if not enabled_sets:
+        await interaction.response.send_message(
+            "⚠️ **No sets enabled!**\n"
+            "Use `/loadsets <numbers>` first to enable sets for auction.\n"
+            "Example: `/loadsets 1 2 3` or `/loadsets 1-5`\n"
+            "Use `/setstatus` to see available sets.",
+            ephemeral=True,
+        )
+        return
+
     success, message = bot.auction_manager.start_auction()
     if not success:
         await interaction.response.send_message(message, ephemeral=True)
         return
 
-    await interaction.response.send_message("**AUCTION STARTED!**")
+    await interaction.response.send_message(
+        f"**AUCTION STARTED!**\nEnabled sets: {', '.join(enabled_sets)}"
+    )
     bot.countdown_channel = interaction.channel
     await asyncio.sleep(PLAYER_GAP)
     await start_next_player(interaction.channel)
@@ -612,8 +712,14 @@ async def help_command(interaction: discord.Interaction):
 `/showlists` - Display all lists
 `/setorder lists` - Set auction order
 
+**Set Management (Admin):**
+`/loadsets 1 2 3` - Enable sets 1, 2, 3 for auction
+`/loadsets 1-5` - Enable sets 1 through 5
+`/setstatus` - Show all sets with remaining players
+`/disablesets` - Disable all sets
+
 **Auction Control (Admin):**
-`/start` - Start auction
+`/start` - Start auction (requires sets to be loaded first!)
 `/stop` - Stop auction
 `/pause` - Pause auction
 `/resume` - Resume auction
@@ -662,9 +768,30 @@ async def start_next_player(channel: discord.TextChannel):
             await asyncio.sleep(LIST_GAP)
             await start_next_player(channel)
         else:
-            await channel.send("**AUCTION COMPLETED!**")
+            # No more players in enabled sets - pause and ask admin to load more
+            enabled_sets = bot.auction_manager.db.get_enabled_sets()
+
+            if enabled_sets:
+                # Sets were enabled but all players in them are done
+                await channel.send("🏁 **CURRENT SETS COMPLETED!**")
+                await channel.send(
+                    "All players in enabled sets have been auctioned.\n"
+                    "Use `/loadsets` to enable more sets and continue.\n"
+                    "Use `/setstatus` to see available sets."
+                )
+            else:
+                # No sets were enabled at all
+                await channel.send(
+                    "⚠️ **NO SETS ENABLED!**\n"
+                    "Use `/loadsets <set_numbers>` to enable sets for auction.\n"
+                    "Example: `/loadsets 1 2 3` to enable sets 1, 2, and 3\n"
+                    "Use `/setstatus` to see all available sets."
+                )
+
+            # Pause auction and wait for admin to load more sets
+            bot.auction_manager.paused = True
+            bot.auction_manager._save_state_to_db()
             await channel.send(bot.auction_manager.get_purse_display())
-            bot.auction_manager.active = False
         return
 
     player_name, base_price = next_player

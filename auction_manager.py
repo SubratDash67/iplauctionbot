@@ -475,11 +475,16 @@ class AuctionManager:
     # ==================== PLAYER MANAGEMENT ====================
 
     def get_next_player(self) -> Optional[Tuple[str, Optional[int]]]:
-        """Get the next player to auction"""
-        list_order = self.db.get_list_order()
+        """Get the next player to auction from ENABLED sets only"""
+        # Only get enabled sets (not all sets)
+        enabled_sets = self.db.get_enabled_sets()
 
-        while self.current_list_index < len(list_order):
-            current_list = list_order[self.current_list_index]
+        if not enabled_sets:
+            # No sets enabled - return None (will trigger "load more sets" message)
+            return None
+
+        while self.current_list_index < len(enabled_sets):
+            current_list = enabled_sets[self.current_list_index]
 
             player_data = self.db.get_random_player_from_list(current_list)
             if player_data:
@@ -502,11 +507,78 @@ class AuctionManager:
         return None
 
     def get_current_list_name(self) -> Optional[str]:
-        """Get the name of the current list"""
-        list_order = self.db.get_list_order()
-        if 0 <= self.current_list_index < len(list_order):
-            return list_order[self.current_list_index]
+        """Get the name of the current list (from enabled sets)"""
+        enabled_sets = self.db.get_enabled_sets()
+        if 0 <= self.current_list_index < len(enabled_sets):
+            return enabled_sets[self.current_list_index]
         return None
+
+    def enable_sets_for_auction(self, set_numbers: List[int]) -> Tuple[bool, str]:
+        """Enable specific sets for auction by their set numbers (1, 2, 3, etc.)
+
+        Converts set numbers to set names and enables them.
+        Resets current_list_index to 0 to start from first enabled set.
+        """
+        # Get all available sets
+        all_sets = self.db.get_all_sets_with_status()
+
+        if not all_sets:
+            return False, "No sets loaded. CSV may not have been loaded properly."
+
+        # Find sets matching the numbers
+        sets_to_enable = []
+        not_found = []
+
+        for num in set_numbers:
+            # Try to find set with name like "1", "2", "set_1", "Set 1", etc.
+            found = False
+            for set_name, _, _ in all_sets:
+                # Extract number from set name
+                set_name_lower = set_name.lower().strip()
+                # Check various formats: "1", "set_1", "set 1", "set1"
+                import re
+
+                match = re.search(r"(\d+)", set_name_lower)
+                if match and int(match.group(1)) == num:
+                    sets_to_enable.append(set_name)
+                    found = True
+                    break
+            if not found:
+                not_found.append(str(num))
+
+        if not sets_to_enable:
+            return False, f"No matching sets found for numbers: {', '.join(not_found)}"
+
+        # Enable the sets
+        count = self.db.enable_sets(sets_to_enable)
+
+        # Reset list index to start from beginning of enabled sets
+        self.current_list_index = 0
+        self._save_state_to_db()
+
+        msg = f"Enabled {count} set(s): {', '.join(sets_to_enable)}"
+        if not_found:
+            msg += f"\nNot found: {', '.join(not_found)}"
+
+        return True, msg
+
+    def get_sets_status(self) -> str:
+        """Get formatted status of all sets"""
+        all_sets = self.db.get_all_sets_with_status()
+
+        if not all_sets:
+            return "No sets loaded."
+
+        msg = "**Sets Status:**\n```\n"
+        msg += f"{'Set':<15} {'Status':<10} {'Remaining':<10}\n"
+        msg += "-" * 35 + "\n"
+
+        for set_name, enabled, remaining in all_sets:
+            status = "✅ ON" if enabled else "❌ OFF"
+            msg += f"{set_name:<15} {status:<10} {remaining:<10}\n"
+
+        msg += "```"
+        return msg
 
     # ==================== ATOMIC BIDDING ====================
 
