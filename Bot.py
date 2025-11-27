@@ -466,8 +466,23 @@ async def pause_auction(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 async def resume_auction(interaction: discord.Interaction):
     """Resume the auction"""
+    # CRITICAL: Check if player was already sold - if so, start next player instead
+    if bot.auction_manager.player_sold:
+        await interaction.response.send_message(
+            "Previous player already sold. Starting next player...", ephemeral=False
+        )
+        bot.auction_manager.paused = False
+        bot.auction_manager._save_state_to_db()
+        await start_next_player(interaction.channel)
+        return
+
     if bot.auction_manager.resume_auction():
-        await interaction.response.send_message("**AUCTION RESUMED**")
+        player = bot.auction_manager.current_player
+        await interaction.response.send_message(
+            f"Auction resumed! Bidding continues for **{player}**"
+            if player
+            else "**AUCTION RESUMED**"
+        )
         bot.countdown_channel = interaction.channel
         if not bot.countdown_task or bot.countdown_task.done():
             bot.countdown_task = asyncio.create_task(
@@ -676,6 +691,15 @@ async def countdown_loop(channel: discord.TextChannel):
     first_bid_placed = False
 
     while bot.auction_manager.active and not bot.auction_manager.paused:
+        # CRITICAL: Exit immediately if player has already been sold
+        if bot.auction_manager.player_sold:
+            if last_msg:
+                try:
+                    await last_msg.delete()
+                except:
+                    pass
+            return
+
         await asyncio.sleep(5)  # Check every 5 seconds (rate limit friendly)
 
         now = time_module.time()

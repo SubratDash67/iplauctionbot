@@ -121,7 +121,10 @@ class AuctionManager:
             if existing_lists:
                 for list_name, players in existing_lists.items():
                     if players:
-                        return True, f"Players already loaded ({len(existing_lists)} lists exist)"
+                        return (
+                            True,
+                            f"Players already loaded ({len(existing_lists)} lists exist)",
+                        )
 
             players_by_set = {}
             row_count = 0
@@ -146,7 +149,11 @@ class AuctionManager:
                     if header is None:
                         low_cells = [c.lower() for c in row if c]
                         # Look for signs of the real header
-                        if any("first name" in c for c in low_cells) or any("list sr" in c for c in low_cells) or any("2025 set" in c for c in low_cells):
+                        if (
+                            any("first name" in c for c in low_cells)
+                            or any("list sr" in c for c in low_cells)
+                            or any("2025 set" in c for c in low_cells)
+                        ):
                             header = row
                             # Build normalized header -> index map
                             for i, col in enumerate(header):
@@ -165,7 +172,17 @@ class AuctionManager:
 
                     # If header already found, skip repeated header lines (some files repeat headers)
                     first_cell = row[0].lower() if row and row[0] else ""
-                    if any(h in first_cell for h in ("list sr.no", "list sr.no.", "list sr", "first name", "tata ipl", "auction list")):
+                    if any(
+                        h in first_cell
+                        for h in (
+                            "list sr.no",
+                            "list sr.no.",
+                            "list sr",
+                            "first name",
+                            "tata ipl",
+                            "auction list",
+                        )
+                    ):
                         skipped_count += 1
                         continue
 
@@ -181,8 +198,17 @@ class AuctionManager:
                     first_name = get_col("First Name", "Firstname", "Player Name")
                     surname = get_col("Surname", "Last Name", "Lastname")
                     set_name = get_col("2025 Set", "2025Set", "Set No.", "Set")
-                    base_price_str = get_col("Base Price", "BasePrice", "Base Price (Lakh)", "Baseprice")
-                    list_sr_no = get_col("List Sr.No.", "List Sr.No", "List Sr No", "ListSrNo", "Sr.No.", "Sr. No.")
+                    base_price_str = get_col(
+                        "Base Price", "BasePrice", "Base Price (Lakh)", "Baseprice"
+                    )
+                    list_sr_no = get_col(
+                        "List Sr.No.",
+                        "List Sr.No",
+                        "List Sr No",
+                        "ListSrNo",
+                        "Sr.No.",
+                        "Sr. No.",
+                    )
 
                     # Skip rows missing essential fields
                     if not first_name:
@@ -191,7 +217,11 @@ class AuctionManager:
 
                     # Filter out header-like rows within data (e.g. stray header repeated)
                     fn_lower = first_name.lower()
-                    if fn_lower in ("first name", "player name", "name") or "tata ipl" in fn_lower or "auction list" in fn_lower:
+                    if (
+                        fn_lower in ("first name", "player name", "name")
+                        or "tata ipl" in fn_lower
+                        or "auction list" in fn_lower
+                    ):
                         skipped_count += 1
                         continue
 
@@ -268,7 +298,10 @@ class AuctionManager:
                 list_order = sorted(players_by_set.keys(), key=lambda x: x.lower())
                 self.db.set_list_order([s.lower() for s in list_order])
 
-            return True, f"Loaded {total_players} players from {len(players_by_set)} sets"
+            return (
+                True,
+                f"Loaded {total_players} players from {len(players_by_set)} sets",
+            )
 
         except FileNotFoundError:
             return False, f"CSV file not found: {filepath}"
@@ -294,6 +327,9 @@ class AuctionManager:
         # Runtime state (not persisted) - Use timestamp instead of counter
         self.last_bid_time = time.time()
         self.countdown_remaining = self.countdown_seconds
+
+        # Flag to track if current player has been sold (prevents double-selling)
+        self.player_sold = False
 
     def _save_state_to_db(self):
         """Save current state to database"""
@@ -424,6 +460,7 @@ class AuctionManager:
         self.current_bid = 0
         self.highest_bidder = None
         self.last_bid_time = time.time()  # Reset timestamp
+        self.player_sold = False  # Reset sold flag
         self.db.reset_auction_state()
 
     def _reset_player_state(self):
@@ -432,6 +469,7 @@ class AuctionManager:
         self.current_bid = 0
         self.highest_bidder = None
         self.last_bid_time = time.time()  # Use timestamp
+        self.player_sold = False  # Reset sold flag for new player
         self.db.clear_all_auto_bids()  # Clear auto-bids for new player
 
     # ==================== PLAYER MANAGEMENT ====================
@@ -502,6 +540,12 @@ class AuctionManager:
 
         if not self.current_player:
             return BidResult(False, "No player is currently being auctioned")
+
+        # CRITICAL: Check if player has already been sold (prevents double-selling)
+        if self.player_sold:
+            return BidResult(
+                False, "This player has already been sold. Wait for next player."
+            )
 
         team_upper = team.upper()
         teams = self.db.get_teams()
@@ -712,6 +756,10 @@ class AuctionManager:
         if not self.current_player:
             return False, None, 0
 
+        # CRITICAL: Prevent double-selling - if already sold, reject
+        if self.player_sold:
+            return False, None, 0
+
         player = self.current_player
         team = self.highest_bidder
         amount = self.current_bid
@@ -727,6 +775,9 @@ class AuctionManager:
             # Record sale
             bid_count = self.db.count_bids_for_player(player)
             self.db.record_sale(player, team, amount, bid_count)
+
+            # CRITICAL: Mark player as sold IMMEDIATELY to prevent any more operations
+            self.player_sold = True
 
             # Update Excel
             try:
