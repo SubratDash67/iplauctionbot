@@ -80,24 +80,15 @@ class Database:
             """
             )
 
-            # List order (with enabled flag for incremental loading)
+            # List order
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS list_order (
                     position INTEGER PRIMARY KEY,
-                    list_name TEXT NOT NULL UNIQUE,
-                    enabled INTEGER DEFAULT 0
+                    list_name TEXT NOT NULL UNIQUE
                 )
             """
             )
-
-            # Migration: Add enabled column if it doesn't exist
-            try:
-                cursor.execute(
-                    "ALTER TABLE list_order ADD COLUMN enabled INTEGER DEFAULT 0"
-                )
-            except sqlite3.OperationalError:
-                pass  # Column already exists
 
             # Auction state (single row)
             cursor.execute(
@@ -343,13 +334,13 @@ class Database:
             return [row["list_name"] for row in cursor.fetchall()]
 
     def set_list_order(self, order: List[str]) -> bool:
-        """Set the order of lists (all disabled by default)"""
+        """Set custom list order"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM list_order")
             for i, list_name in enumerate(order):
                 cursor.execute(
-                    "INSERT INTO list_order (position, list_name, enabled) VALUES (?, ?, 0)",
+                    "INSERT INTO list_order (position, list_name) VALUES (?, ?)",
                     (i, list_name.lower()),
                 )
             return True
@@ -392,69 +383,6 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM player_lists")
             cursor.execute("DELETE FROM list_order")
-
-    # ==================== SET ENABLE/DISABLE OPERATIONS ====================
-
-    def enable_sets(self, set_names: List[str]) -> int:
-        """Enable specific sets for auction. Returns count of sets enabled."""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            count = 0
-            for set_name in set_names:
-                cursor.execute(
-                    "UPDATE list_order SET enabled = 1 WHERE LOWER(list_name) = LOWER(?)",
-                    (set_name,),
-                )
-                count += cursor.rowcount
-            return count
-
-    def disable_all_sets(self):
-        """Disable all sets"""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE list_order SET enabled = 0")
-
-    def get_enabled_sets(self) -> List[str]:
-        """Get list of enabled set names in order"""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT list_name FROM list_order WHERE enabled = 1 ORDER BY position"
-            )
-            return [row["list_name"] for row in cursor.fetchall()]
-
-    def get_all_sets_with_status(self) -> List[Tuple[str, bool, int]]:
-        """Get all sets with their enabled status and unauctioned player count.
-        Returns list of (set_name, enabled, remaining_players)"""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT lo.list_name, lo.enabled,
-                       (SELECT COUNT(*) FROM player_lists pl 
-                        WHERE pl.list_name = lo.list_name AND pl.auctioned = 0) as remaining
-                FROM list_order lo
-                ORDER BY lo.position
-                """
-            )
-            return [
-                (row["list_name"], bool(row["enabled"]), row["remaining"])
-                for row in cursor.fetchall()
-            ]
-
-    def has_unauctioned_players_in_enabled_sets(self) -> bool:
-        """Check if any enabled set has unauctioned players"""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT COUNT(*) as cnt FROM player_lists pl
-                JOIN list_order lo ON pl.list_name = lo.list_name
-                WHERE lo.enabled = 1 AND pl.auctioned = 0
-                """
-            )
-            row = cursor.fetchone()
-            return row["cnt"] > 0 if row else False
 
     # ==================== AUCTION STATE OPERATIONS ====================
 
