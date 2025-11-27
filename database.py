@@ -80,15 +80,24 @@ class Database:
             """
             )
 
-            # List order
+            # List order (with enabled flag for incremental loading)
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS list_order (
                     position INTEGER PRIMARY KEY,
-                    list_name TEXT NOT NULL UNIQUE
+                    list_name TEXT NOT NULL UNIQUE,
+                    enabled INTEGER DEFAULT 0
                 )
             """
             )
+
+            # Migration: Add enabled column if it doesn't exist
+            try:
+                cursor.execute(
+                    "ALTER TABLE list_order ADD COLUMN enabled INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
             # Auction state (single row)
             cursor.execute(
@@ -103,7 +112,10 @@ class Database:
                     current_bid INTEGER DEFAULT 0,
                     highest_bidder TEXT,
                     countdown_seconds INTEGER DEFAULT 15,
-                    extensions_used INTEGER DEFAULT 0
+                    extensions_used INTEGER DEFAULT 0,
+                    last_bid_time REAL DEFAULT 0,
+                    stats_channel_id INTEGER DEFAULT 0,
+                    stats_message_id INTEGER DEFAULT 0
                 )
             """
             )
@@ -266,24 +278,24 @@ class Database:
     # ==================== PLAYER LIST OPERATIONS ====================
 
     def create_list(self, list_name: str) -> bool:
-        """Create a new player list"""
+        """Create a new player list (preserve original list_name case)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT COUNT(*) as cnt FROM player_lists WHERE list_name = ?",
-                (list_name.lower(),),
+                "SELECT COUNT(*) as cnt FROM player_lists WHERE LOWER(list_name) = LOWER(?)",
+                (list_name,),
             )
             if cursor.fetchone()["cnt"] > 0:
                 return False
 
-            # Add to list order
+            # Add to list order preserving the provided name
             cursor.execute(
                 "SELECT COALESCE(MAX(position), 0) + 1 as next_pos FROM list_order"
             )
             next_pos = cursor.fetchone()["next_pos"]
             cursor.execute(
                 "INSERT OR IGNORE INTO list_order (position, list_name) VALUES (?, ?)",
-                (next_pos, list_name.lower()),
+                (next_pos, list_name),
             )
             return True
 
@@ -295,7 +307,7 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO player_lists (list_name, player_name, base_price) VALUES (?, ?, ?)",
-                (list_name.lower(), player_name, base_price),
+                (list_name, player_name, base_price),
             )
             return True
 
@@ -308,7 +320,7 @@ class Database:
             for player_name, base_price in players:
                 cursor.execute(
                     "INSERT INTO player_lists (list_name, player_name, base_price) VALUES (?, ?, ?)",
-                    (list_name.lower(), player_name, base_price),
+                    (list_name, player_name, base_price),
                 )
 
     def get_player_lists(self) -> Dict[str, List[Tuple[str, Optional[int]]]]:
@@ -327,21 +339,21 @@ class Database:
             return lists
 
     def get_list_order(self) -> List[str]:
-        """Get the order of lists"""
+        """Get the order of lists (returns names as stored - preserves case)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT list_name FROM list_order ORDER BY position")
             return [row["list_name"] for row in cursor.fetchall()]
 
     def set_list_order(self, order: List[str]) -> bool:
-        """Set custom list order"""
+        """Set the order of lists (all disabled by default)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM list_order")
             for i, list_name in enumerate(order):
                 cursor.execute(
-                    "INSERT INTO list_order (position, list_name) VALUES (?, ?)",
-                    (i, list_name.lower()),
+                    "INSERT INTO list_order (position, list_name, enabled) VALUES (?, ?, 0)",
+                    (i, list_name),
                 )
             return True
 
@@ -350,8 +362,8 @@ class Database:
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE player_lists SET auctioned = 1 WHERE list_name = ? AND player_name = ? AND auctioned = 0 LIMIT 1",
-                (list_name.lower(), player_name),
+                "UPDATE player_lists SET auctioned = 1 WHERE list_name = ? AND player_name = ? AND auctioned = 0",
+                (list_name, player_name),
             )
 
     def get_random_player_from_list(
@@ -362,7 +374,7 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT id, player_name, base_price FROM player_lists WHERE list_name = ? AND auctioned = 0 ORDER BY RANDOM() LIMIT 1",
-                (list_name.lower(),),
+                (list_name,),
             )
             row = cursor.fetchone()
             if row:
@@ -383,6 +395,89 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM player_lists")
             cursor.execute("DELETE FROM list_order")
+
+    # ==================== SET ENABLE/DISABLE OPERATIONS ====================
+
+    def enable_sets(self, set_names: List[str]) -> int:
+        """Enable specific sets for auction. Returns count of sets enabled."""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            count = 0
+            for set_name in set_names:
+                cursor.execute(
+                    "UPDATE list_order SET enabled = 1 WHERE LOWER(list_name) = LOWER(?)",
+                    (set_name,),
+                )
+                count += cursor.rowcount
+            return count
+
+    def disable_all_sets(self):
+        """Disable all sets"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE list_order SET enabled = 0")
+
+    def get_enabled_sets(self) -> List[str]:
+        """Get list of enabled set names in order"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT list_name FROM list_order WHERE enabled = 1 ORDER BY position"
+            )
+            return [row["list_name"] for row in cursor.fetchall()]
+
+    def get_all_sets_with_status(self) -> List[Tuple[str, bool, int]]:
+        """Get all sets with their enabled status and unauctioned player count.
+        Returns list of (set_name, enabled, remaining_players)"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT lo.list_name, lo.enabled,
+                       (SELECT COUNT(*) FROM player_lists pl 
+                        WHERE pl.list_name = lo.list_name AND pl.auctioned = 0) as remaining
+                FROM list_order lo
+                ORDER BY lo.position
+                """
+            )
+            return [
+                (row["list_name"], bool(row["enabled"]), row["remaining"])
+                for row in cursor.fetchall()
+            ]
+
+    def has_unauctioned_players_in_enabled_sets(self) -> bool:
+        """Check if any enabled set has unauctioned players"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*) as cnt FROM player_lists pl
+                JOIN list_order lo ON pl.list_name = lo.list_name
+                WHERE lo.enabled = 1 AND pl.auctioned = 0
+                """
+            )
+            row = cursor.fetchone()
+            return row["cnt"] > 0 if row else False
+
+    # ==================== ADMIN LIST OPERATIONS ====================
+
+    def delete_list(self, list_name: str) -> int:
+        """
+        Delete a list (all players in it) and remove from list_order.
+        Returns number of player rows deleted.
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            # Delete player rows (case-insensitive)
+            cursor.execute(
+                "DELETE FROM player_lists WHERE LOWER(list_name) = LOWER(?)", (list_name,)
+            )
+            deleted = cursor.rowcount
+            # Remove from list order
+            cursor.execute(
+                "DELETE FROM list_order WHERE LOWER(list_name) = LOWER(?)", (list_name,)
+            )
+            return deleted
 
     # ==================== AUCTION STATE OPERATIONS ====================
 
@@ -420,7 +515,10 @@ class Database:
                     base_price = 0,
                     current_bid = 0,
                     highest_bidder = NULL,
-                    extensions_used = 0
+                    extensions_used = 0,
+                    last_bid_time = 0,
+                    stats_channel_id = 0,
+                    stats_message_id = 0
                 WHERE id = 1
             """
             )
