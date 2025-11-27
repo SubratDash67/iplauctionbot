@@ -314,11 +314,10 @@ async def team_squad(interaction: discord.Interaction):
     await interaction.response.send_message(msg)
 
 
-@bot.tree.command(name="squad", description="View any team's squad (Admin only)")
+@bot.tree.command(name="squad", description="View any team's squad and purse")
 @app_commands.describe(team="Team Code (e.g. MI, CSK)")
-@app_commands.checks.has_permissions(administrator=True)
-async def admin_squad(interaction: discord.Interaction, team: str):
-    """Admin command to view any team's squad"""
+async def view_squad(interaction: discord.Interaction, team: str):
+    """View any team's squad - available to all users"""
     team_upper = team.upper()
     from config import TEAMS
 
@@ -332,20 +331,19 @@ async def admin_squad(interaction: discord.Interaction, team: str):
     if team_upper not in squads or not squads[team_upper]:
         await interaction.response.send_message(
             f"**{team_upper}** has no players yet.\nRemaining Purse: {format_amount(teams_purse.get(team_upper, 0))}",
-            ephemeral=True,
         )
         return
 
     squad = squads[team_upper]
     total_spent = sum(price for _, price in squad)
 
-    msg = f"**{team_upper} Squad (Admin View):**\n```\n"
+    msg = f"**{team_upper} Squad:**\n```\n"
     for player, price in squad:
         msg += f"{player:30} : {format_amount(price)}\n"
     msg += f"\n{'='*50}\n"
     msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
     msg += f"{'Remaining Purse':30} : {format_amount(teams_purse.get(team_upper, 0))}\n"
-    msg += f"{'Players Bought':30} : {len(squad)}\n"
+    msg += f"{'Players':30} : {len(squad)}\n"
     msg += "```"
 
     await interaction.response.send_message(msg)
@@ -388,10 +386,14 @@ async def release_player(interaction: discord.Interaction, team: str, player: st
 @bot.tree.command(
     name="addtosquad", description="Manually add a player to a squad (Admin only)"
 )
-@app_commands.describe(team="Team Code", player="Player Name", price="Price in Rupees")
+@app_commands.describe(
+    team="Team Code",
+    player="Player Name",
+    price="Price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)",
+)
 @app_commands.checks.has_permissions(administrator=True)
 async def add_to_squad(
-    interaction: discord.Interaction, team: str, player: str, price: int
+    interaction: discord.Interaction, team: str, player: str, price: float
 ):
     success, msg = bot.auction_manager.manual_add_player(team, player, price)
     if success:
@@ -404,7 +406,7 @@ async def add_to_squad(
     player="Player Name",
     from_team="Source Team",
     to_team="Target Team",
-    price="Trade Value",
+    price="Trade Value in Crores (e.g., 2 = 2Cr, 0.5 = 50L)",
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def trade(
@@ -412,7 +414,7 @@ async def trade(
     player: str,
     from_team: str,
     to_team: str,
-    price: int,
+    price: float,
 ):
     success, msg = bot.auction_manager.trade_player(player, from_team, to_team, price)
     if success:
@@ -597,19 +599,91 @@ async def reauction_from_list(interaction: discord.Interaction, set_name: str):
 # ============================================================
 
 
-@bot.tree.command(name="addplayer", description="Add a player to a list")
-@app_commands.describe(list_name="Name of the list", player_name="Player name to add")
+@bot.tree.command(name="addplayer", description="Add a player to a list (Admin only)")
+@app_commands.describe(
+    list_name="Name of the list",
+    player_name="Player name to add",
+    base_price="Base price in Crores (e.g., 2 = 2Cr, 0.5 = 50L). Default: 0.2Cr (20L)",
+)
+@app_commands.checks.has_permissions(administrator=True)
 async def add_player(
-    interaction: discord.Interaction, list_name: str, player_name: str
+    interaction: discord.Interaction,
+    list_name: str,
+    player_name: str,
+    base_price: float = 0.2,
 ):
-    if bot.auction_manager.add_player_to_list(list_name, (player_name, None)):
+    # Convert Crores to Rupees
+    price_rupees = int(base_price * 10_000_000)
+
+    # Create list if it doesn't exist
+    bot.auction_manager.create_list(list_name)
+
+    if bot.auction_manager.add_player_to_list(list_name, (player_name, price_rupees)):
         await interaction.response.send_message(
-            f"Added **{player_name}** to list **{list_name}**"
+            f"Added **{player_name}** to list **{list_name}** with base price {format_amount(price_rupees)}"
         )
     else:
         await interaction.response.send_message(
-            f"List **{list_name}** does not exist.", ephemeral=True
+            f"Failed to add player to list **{list_name}**.", ephemeral=True
         )
+
+
+@bot.tree.command(
+    name="addplayers", description="Add multiple players to a list (Admin only)"
+)
+@app_commands.describe(
+    list_name="Name of the list (will be created if doesn't exist)",
+    players="Players in format: Name1:Price1, Name2:Price2 (Price in Cr, e.g., Virat:2, Rohit:1.5)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def add_players_bulk(
+    interaction: discord.Interaction, list_name: str, players: str
+):
+    """Add multiple players at once. Format: Name1:Price1, Name2:Price2"""
+    # Create list if it doesn't exist
+    bot.auction_manager.create_list(list_name)
+
+    added = []
+    failed = []
+
+    # Parse players string
+    player_entries = [p.strip() for p in players.split(",")]
+
+    for entry in player_entries:
+        entry = entry.strip()
+        if not entry:
+            continue
+
+        # Parse Name:Price or just Name
+        if ":" in entry:
+            parts = entry.split(":", 1)
+            player_name = parts[0].strip()
+            try:
+                price_cr = float(parts[1].strip())
+            except ValueError:
+                price_cr = 0.2  # Default 20L
+        else:
+            player_name = entry
+            price_cr = 0.2  # Default 20L
+
+        price_rupees = int(price_cr * 10_000_000)
+
+        if bot.auction_manager.add_player_to_list(
+            list_name, (player_name, price_rupees)
+        ):
+            added.append(f"{player_name} ({format_amount(price_rupees)})")
+        else:
+            failed.append(player_name)
+
+    msg = f"**Added {len(added)} players to list '{list_name}':**\n"
+    if added:
+        msg += "\n".join(f"✅ {p}" for p in added[:20])  # Limit display
+        if len(added) > 20:
+            msg += f"\n... and {len(added) - 20} more"
+    if failed:
+        msg += f"\n\n**Failed ({len(failed)}):** {', '.join(failed)}"
+
+    await interaction.response.send_message(msg)
 
 
 @bot.tree.command(
@@ -908,6 +982,28 @@ async def show_status(interaction: discord.Interaction):
     await interaction.response.send_message(status)
 
 
+@bot.tree.command(name="allsquads", description="View summary of all teams' squads")
+async def all_squads(interaction: discord.Interaction):
+    """View a summary of all teams - available to everyone"""
+    squads = bot.auction_manager.team_squads
+    teams_purse = bot.auction_manager.teams
+
+    msg = "**📋 All Teams Summary:**\n```\n"
+    msg += f"{'Team':<6} {'Players':>8} {'Spent':>12} {'Purse':>12}\n"
+    msg += "=" * 42 + "\n"
+
+    for team_code in sorted(teams_purse.keys()):
+        squad = squads.get(team_code, [])
+        player_count = len(squad)
+        total_spent = sum(price for _, price in squad)
+        purse = teams_purse.get(team_code, 0)
+
+        msg += f"{team_code:<6} {player_count:>8} {format_amount(total_spent):>12} {format_amount(purse):>12}\n"
+
+    msg += "```\n*Use `/squad <team>` to view detailed squad*"
+    await interaction.response.send_message(msg)
+
+
 @bot.tree.command(name="userhelp", description="Show commands for players/users")
 async def user_help_command(interaction: discord.Interaction):
     help_text = """
@@ -921,8 +1017,12 @@ async def user_help_command(interaction: discord.Interaction):
 `/bid` - Place a bid for the current player on behalf of your team.
 `/bidhistory` - View the most recent bids placed.
 
-**Info:**
+**View Teams:**
+`/squad <team>` - View any team's detailed squad.
+`/allsquads` - View summary of all teams.
 `/showpurse` - See remaining purse for all teams.
+
+**Info:**
 `/status` - Check the current player and auction status.
 `/showlists` - View the upcoming player lists.
 """
@@ -951,10 +1051,9 @@ async def admin_help_command(interaction: discord.Interaction):
 `/assignteam @user TEAM` - Assign a user to a team.
 `/unassignteam @user` - Remove a user from a team.
 `/setpurse TEAM amount` - Manually adjust a team's purse.
-`/squad TEAM` - View any team's squad.
-`/addtosquad TEAM player price` - Manually add a player to a team.
+`/addtosquad TEAM player price` - Add player to team (price in Cr).
 `/release TEAM player` - Remove a player from a team (refunds money).
-`/trade player from_team to_team price` - Move a player between teams.
+`/trade player from_team to_team price` - Move player (price in Cr).
 
 **Re-Auction (Unsold Players):**
 `/showunsold` - View all unsold players.
@@ -964,7 +1063,8 @@ async def admin_help_command(interaction: discord.Interaction):
 
 **List Management:**
 `/loadsets max_set` - Load players from CSV (Sets 1 to X).
-`/addplayer list player` - Add a single player to a list.
+`/addplayer list player price` - Add a player (price in Cr, default 0.2).
+`/addplayers list "Name1:Price1, Name2:Price2"` - Add multiple players.
 `/setorder list1 list2` - Set the order of player lists.
 `/deleteset set_name` - Delete a set and all its players.
 
@@ -1073,6 +1173,7 @@ async def countdown_loop(channel: discord.TextChannel):
 
     last_msg = None
     first_bid_placed = False
+    warning_sent = False  # Track if we've sent the warning
 
     while bot.auction_manager.active and not bot.auction_manager.paused:
         await asyncio.sleep(5)
@@ -1084,37 +1185,63 @@ async def countdown_loop(channel: discord.TextChannel):
 
         if bot.auction_manager.highest_bidder is not None:
             first_bid_placed = True
+            warning_sent = False  # Reset warning if bid placed
 
         if not first_bid_placed:
             elapsed_since_start = now - player_start_time
             remaining = NO_START_TIMEOUT - int(elapsed_since_start)
 
-            if remaining <= 0:
+            # Send warning at 15 seconds remaining
+            if remaining <= 15 and remaining > 0 and not warning_sent:
+                warning_sent = True
                 await channel.send(
-                    f"⏰ No bids in {NO_START_TIMEOUT}s - Player **{current_player_name}** goes UNSOLD"
+                    f"⚠️ **WARNING:** No bids yet! **{current_player_name}** will go UNSOLD in **{remaining}s**!"
                 )
+
+            if remaining <= 0:
+                if last_msg:
+                    try:
+                        await last_msg.delete()
+                    except:
+                        pass
+                await channel.send(
+                    f"⏰ No bids received - Player **{current_player_name}** goes **UNSOLD**"
+                )
+                # Clear player state - they are now unsold, will only come back on /reauction
+                bot.auction_manager._reset_player_state()
+                bot.auction_manager._save_state_to_db()
                 await asyncio.sleep(2)
                 asyncio.create_task(start_next_player(channel))
                 return
 
-            if int(elapsed_since_start) % 15 == 0:
+            # Only show countdown at 30s mark (reduced from every 15s)
+            if remaining == 30:
                 if last_msg:
                     try:
                         await last_msg.edit(
-                            content=f"⏳ Waiting for first bid... ({remaining}s remaining before unsold)"
+                            content=f"⏳ Waiting for first bid... ({remaining}s remaining)"
                         )
                     except:
                         last_msg = await channel.send(
-                            f"⏳ Waiting for first bid... ({remaining}s remaining before unsold)"
+                            f"⏳ Waiting for first bid... ({remaining}s remaining)"
                         )
                 else:
                     last_msg = await channel.send(
-                        f"⏳ Waiting for first bid... ({remaining}s remaining before unsold)"
+                        f"⏳ Waiting for first bid... ({remaining}s remaining)"
                     )
 
         else:
             elapsed_since_last_bid = now - bot.auction_manager.last_bid_time
             remaining = NO_BID_TIMEOUT - int(elapsed_since_last_bid)
+
+            # Send warning at 20 seconds remaining
+            if remaining <= 20 and remaining > 0 and not warning_sent:
+                warning_sent = True
+                current_bid = bot.auction_manager.current_bid
+                current_team = bot.auction_manager.highest_bidder
+                await channel.send(
+                    f"⚠️ **GOING ONCE!** {format_amount(current_bid)} to **{current_team}**! {remaining}s remaining..."
+                )
 
             if remaining <= 0:
                 if last_msg:
@@ -1155,26 +1282,20 @@ async def countdown_loop(channel: discord.TextChannel):
 
                     asyncio.create_task(bot.update_stats_display())
                 else:
-                    await channel.send(f"Player **{player_name}** went UNSOLD.")
+                    await channel.send(f"Player **{player_name}** went **UNSOLD**.")
+                    # Player is already marked as auctioned, will only come back on /reauction
 
                 await asyncio.sleep(2)
                 asyncio.create_task(start_next_player(channel))
                 return
 
-            if int(elapsed_since_last_bid) % 10 == 0:
+            # Removed frequent timer updates - only show at key intervals (60s, 30s)
+            if remaining in [60, 30] and int(elapsed_since_last_bid) % 5 == 0:
                 if last_msg:
                     try:
-                        await last_msg.edit(
-                            content=f"⏳ Time since last bid: {int(elapsed_since_last_bid)}s / {NO_BID_TIMEOUT}s"
-                        )
+                        await last_msg.edit(content=f"⏳ {remaining}s remaining...")
                     except:
-                        last_msg = await channel.send(
-                            f"⏳ Time since last bid: {int(elapsed_since_last_bid)}s / {NO_BID_TIMEOUT}s"
-                        )
-                else:
-                    last_msg = await channel.send(
-                        f"⏳ Time since last bid: {int(elapsed_since_last_bid)}s / {NO_BID_TIMEOUT}s"
-                    )
+                        pass
 
         if bot.auction_manager.paused:
             if last_msg:

@@ -877,6 +877,15 @@ class Database:
 
             original_price = row["price"]
 
+            # Check if target team has enough purse BEFORE making changes
+            cursor.execute(
+                "SELECT purse FROM teams WHERE team_code = ?",
+                (to_team,),
+            )
+            target_purse = cursor.fetchone()
+            if not target_purse or target_purse["purse"] < price:
+                return False  # Insufficient purse
+
             # Remove from source team
             cursor.execute(
                 "DELETE FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
@@ -889,16 +898,16 @@ class Database:
                 (original_price, from_team),
             )
 
+            # Deduct from target team (already validated above)
+            cursor.execute(
+                "UPDATE teams SET purse = purse - ? WHERE team_code = ?",
+                (price, to_team),
+            )
+
             # Add to target team
             cursor.execute(
                 "INSERT INTO team_squads (team_code, player_name, price) VALUES (?, ?, ?)",
                 (to_team, player_name, price),
-            )
-
-            # Deduct from target team
-            cursor.execute(
-                "UPDATE teams SET purse = purse - ? WHERE team_code = ? AND purse >= ?",
-                (price, to_team, price),
             )
 
             return True

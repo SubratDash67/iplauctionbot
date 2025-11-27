@@ -695,26 +695,63 @@ class AuctionManager:
 
     # ==================== TRADING & MANUAL ====================
     def trade_player(
-        self, player_name: str, from_team: str, to_team: str, price: int
+        self, player_name: str, from_team: str, to_team: str, price_cr: float
     ) -> Tuple[bool, str]:
-        """Trade player between teams"""
+        """Trade player between teams
+
+        Args:
+            player_name: Player to trade
+            from_team: Source team
+            to_team: Destination team
+            price_cr: Price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)
+        """
+        # Convert Crores to Rupees (1 Cr = 10,000,000)
+        price = int(price_cr * 10_000_000)
+
+        # Validate target team has enough purse
+        to_team_upper = to_team.upper()
+        teams = self.db.get_teams()
+        if to_team_upper in teams and teams[to_team_upper] < price:
+            return (
+                False,
+                f"**{to_team_upper}** has insufficient purse. Need {format_amount(price)}, have {format_amount(teams[to_team_upper])}",
+            )
+
         success = self.db.trade_player(
-            player_name, from_team.upper(), to_team.upper(), price
+            player_name, from_team.upper(), to_team_upper, price
         )
         if success:
             return (
                 True,
-                f"Traded **{player_name}** from **{from_team}** to **{to_team}** for {format_amount(price)}",
+                f"Traded **{player_name}** from **{from_team.upper()}** to **{to_team_upper}** for {format_amount(price)}",
             )
         return False, "Trade failed. Check if player exists in source team."
 
-    def manual_add_player(self, team: str, player: str, price: int) -> Tuple[bool, str]:
-        """Manually add a player to a squad"""
+    def manual_add_player(
+        self, team: str, player: str, price_cr: float
+    ) -> Tuple[bool, str]:
+        """Manually add a player to a squad
+
+        Args:
+            team: Team code
+            player: Player name
+            price_cr: Price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)
+        """
         team_upper = team.upper()
         teams = self.db.get_teams()
 
         if team_upper not in teams:
             return False, "Invalid team."
+
+        # Convert Crores to Rupees (1 Cr = 10,000,000)
+        price = int(price_cr * 10_000_000)
+
+        # Check if purse would go negative
+        if teams[team_upper] < price:
+            return (
+                False,
+                f"Insufficient purse. Need {format_amount(price)}, have {format_amount(teams[team_upper])}",
+            )
 
         if not self.db.deduct_from_purse(team_upper, price):
             return False, "Insufficient purse."
@@ -846,8 +883,16 @@ class AuctionManager:
 
     # ==================== RELEASE PLAYERS ====================
 
-    def release_retained_player(self, team: str, player_name: str) -> Tuple[bool, str]:
-        """Release any player from a squad back into auction (Retained or Sold)"""
+    def release_retained_player(
+        self, team: str, player_name: str, before_auction: bool = False
+    ) -> Tuple[bool, str]:
+        """Release any player from a squad back into auction (Retained or Sold)
+
+        Args:
+            team: Team code
+            player_name: Player to release
+            before_auction: If True, allows release even if auction hasn't started
+        """
         team_upper = team.upper()
         teams = self.db.get_teams()
 
