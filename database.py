@@ -112,10 +112,7 @@ class Database:
                     current_bid INTEGER DEFAULT 0,
                     highest_bidder TEXT,
                     countdown_seconds INTEGER DEFAULT 15,
-                    extensions_used INTEGER DEFAULT 0,
-                    last_bid_time REAL DEFAULT 0,
-                    stats_channel_id INTEGER DEFAULT 0,
-                    stats_message_id INTEGER DEFAULT 0
+                    extensions_used INTEGER DEFAULT 0
                 )
             """
             )
@@ -278,24 +275,24 @@ class Database:
     # ==================== PLAYER LIST OPERATIONS ====================
 
     def create_list(self, list_name: str) -> bool:
-        """Create a new player list (preserve original list_name case)"""
+        """Create a new player list"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT COUNT(*) as cnt FROM player_lists WHERE LOWER(list_name) = LOWER(?)",
-                (list_name,),
+                "SELECT COUNT(*) as cnt FROM player_lists WHERE list_name = ?",
+                (list_name.lower(),),
             )
             if cursor.fetchone()["cnt"] > 0:
                 return False
 
-            # Add to list order preserving the provided name
+            # Add to list order
             cursor.execute(
                 "SELECT COALESCE(MAX(position), 0) + 1 as next_pos FROM list_order"
             )
             next_pos = cursor.fetchone()["next_pos"]
             cursor.execute(
                 "INSERT OR IGNORE INTO list_order (position, list_name) VALUES (?, ?)",
-                (next_pos, list_name),
+                (next_pos, list_name.lower()),
             )
             return True
 
@@ -307,7 +304,7 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO player_lists (list_name, player_name, base_price) VALUES (?, ?, ?)",
-                (list_name, player_name, base_price),
+                (list_name.lower(), player_name, base_price),
             )
             return True
 
@@ -320,7 +317,7 @@ class Database:
             for player_name, base_price in players:
                 cursor.execute(
                     "INSERT INTO player_lists (list_name, player_name, base_price) VALUES (?, ?, ?)",
-                    (list_name, player_name, base_price),
+                    (list_name.lower(), player_name, base_price),
                 )
 
     def get_player_lists(self) -> Dict[str, List[Tuple[str, Optional[int]]]]:
@@ -339,7 +336,7 @@ class Database:
             return lists
 
     def get_list_order(self) -> List[str]:
-        """Get the order of lists (returns names as stored - preserves case)"""
+        """Get the order of lists"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT list_name FROM list_order ORDER BY position")
@@ -353,7 +350,7 @@ class Database:
             for i, list_name in enumerate(order):
                 cursor.execute(
                     "INSERT INTO list_order (position, list_name, enabled) VALUES (?, ?, 0)",
-                    (i, list_name),
+                    (i, list_name.lower()),
                 )
             return True
 
@@ -362,8 +359,8 @@ class Database:
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE player_lists SET auctioned = 1 WHERE list_name = ? AND player_name = ? AND auctioned = 0",
-                (list_name, player_name),
+                "UPDATE player_lists SET auctioned = 1 WHERE list_name = ? AND player_name = ? AND auctioned = 0 LIMIT 1",
+                (list_name.lower(), player_name),
             )
 
     def get_random_player_from_list(
@@ -374,7 +371,7 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT id, player_name, base_price FROM player_lists WHERE list_name = ? AND auctioned = 0 ORDER BY RANDOM() LIMIT 1",
-                (list_name,),
+                (list_name.lower(),),
             )
             row = cursor.fetchone()
             if row:
@@ -459,26 +456,6 @@ class Database:
             row = cursor.fetchone()
             return row["cnt"] > 0 if row else False
 
-    # ==================== ADMIN LIST OPERATIONS ====================
-
-    def delete_list(self, list_name: str) -> int:
-        """
-        Delete a list (all players in it) and remove from list_order.
-        Returns number of player rows deleted.
-        """
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            # Delete player rows (case-insensitive)
-            cursor.execute(
-                "DELETE FROM player_lists WHERE LOWER(list_name) = LOWER(?)", (list_name,)
-            )
-            deleted = cursor.rowcount
-            # Remove from list order
-            cursor.execute(
-                "DELETE FROM list_order WHERE LOWER(list_name) = LOWER(?)", (list_name,)
-            )
-            return deleted
-
     # ==================== AUCTION STATE OPERATIONS ====================
 
     def get_auction_state(self) -> dict:
@@ -515,10 +492,7 @@ class Database:
                     base_price = 0,
                     current_bid = 0,
                     highest_bidder = NULL,
-                    extensions_used = 0,
-                    last_bid_time = 0,
-                    stats_channel_id = 0,
-                    stats_message_id = 0
+                    extensions_used = 0
                 WHERE id = 1
             """
             )
