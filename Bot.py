@@ -370,6 +370,8 @@ async def bid_history(interaction: discord.Interaction, limit: int = 10):
 @bot.tree.command(name="teamsquad", description="Show players in your team")
 async def team_squad(interaction: discord.Interaction):
     """Shows the squad for the user's assigned team"""
+    from config import TEAM_SLOTS
+
     user_id = interaction.user.id
     team_upper = bot.user_teams.get(user_id)
 
@@ -383,23 +385,29 @@ async def team_squad(interaction: discord.Interaction):
     squads = bot.auction_manager.team_squads
     teams_purse = bot.auction_manager.teams
 
-    if team_upper not in squads or not squads[team_upper]:
-        await interaction.response.send_message(
-            f"**{team_upper}** has no players yet.\nRemaining Purse: {format_amount(teams_purse.get(team_upper, 0))}",
-            ephemeral=True,
-        )
-        return
+    # Get slot info
+    slots = TEAM_SLOTS.get(team_upper, {"overseas": 0, "total": 0})
+    overseas_slots = slots["overseas"]
+    total_slots = slots["total"]
 
-    squad = squads[team_upper]
-    total_spent = sum(price for _, price in squad)
+    squad = squads.get(team_upper, [])
+    current_players = len(squad)
+    total_spent = sum(price for _, price in squad) if squad else 0
+    purse = teams_purse.get(team_upper, 0)
 
     msg = f"**{team_upper} Squad:**\n```\n"
-    for player, price in squad:
-        msg += f"{player:30} : {format_amount(price)}\n"
+    if squad:
+        for player, price in squad:
+            msg += f"{player:30} : {format_amount(price)}\n"
+    else:
+        msg += "No players yet.\n"
     msg += f"\n{'='*50}\n"
     msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
-    msg += f"{'Remaining Purse':30} : {format_amount(teams_purse.get(team_upper, 0))}\n"
-    msg += f"{'Players Bought':30} : {len(squad)}\n"
+    msg += f"{'Remaining Purse':30} : {format_amount(purse)}\n"
+    msg += f"{'Players':30} : {current_players}\n"
+    msg += f"{'Overseas Slots':30} : {overseas_slots}\n"
+    msg += f"{'Total Slots Available':30} : {total_slots}\n"
+    msg += f"{'Slots Remaining':30} : {max(0, total_slots - current_players)}\n"
     msg += "```"
 
     await interaction.response.send_message(msg)
@@ -409,8 +417,9 @@ async def team_squad(interaction: discord.Interaction):
 @app_commands.describe(team="Team Code (e.g. MI, CSK)")
 async def view_squad(interaction: discord.Interaction, team: str):
     """View any team's squad - available to all users"""
+    from config import TEAMS, TEAM_SLOTS
+
     team_upper = team.upper()
-    from config import TEAMS
 
     if team_upper not in TEAMS:
         await interaction.response.send_message(f"Invalid team: {team}", ephemeral=True)
@@ -419,22 +428,29 @@ async def view_squad(interaction: discord.Interaction, team: str):
     squads = bot.auction_manager.team_squads
     teams_purse = bot.auction_manager.teams
 
-    if team_upper not in squads or not squads[team_upper]:
-        await interaction.response.send_message(
-            f"**{team_upper}** has no players yet.\nRemaining Purse: {format_amount(teams_purse.get(team_upper, 0))}",
-        )
-        return
+    # Get slot info
+    slots = TEAM_SLOTS.get(team_upper, {"overseas": 0, "total": 0})
+    overseas_slots = slots["overseas"]
+    total_slots = slots["total"]
 
-    squad = squads[team_upper]
-    total_spent = sum(price for _, price in squad)
+    squad = squads.get(team_upper, [])
+    current_players = len(squad)
+    total_spent = sum(price for _, price in squad) if squad else 0
+    purse = teams_purse.get(team_upper, 0)
 
     msg = f"**{team_upper} Squad:**\n```\n"
-    for player, price in squad:
-        msg += f"{player:30} : {format_amount(price)}\n"
+    if squad:
+        for player, price in squad:
+            msg += f"{player:30} : {format_amount(price)}\n"
+    else:
+        msg += "No players yet.\n"
     msg += f"\n{'='*50}\n"
     msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
-    msg += f"{'Remaining Purse':30} : {format_amount(teams_purse.get(team_upper, 0))}\n"
-    msg += f"{'Players':30} : {len(squad)}\n"
+    msg += f"{'Remaining Purse':30} : {format_amount(purse)}\n"
+    msg += f"{'Players':30} : {current_players}\n"
+    msg += f"{'Overseas Slots':30} : {overseas_slots}\n"
+    msg += f"{'Total Slots Available':30} : {total_slots}\n"
+    msg += f"{'Slots Remaining':30} : {max(0, total_slots - current_players)}\n"
     msg += "```"
 
     await interaction.response.send_message(msg)
@@ -617,7 +633,16 @@ async def mark_unsold(interaction: discord.Interaction):
         return
 
     player = bot.auction_manager.current_player
-    await interaction.response.send_message(f"Player **{player}** marked UNSOLD")
+
+    # Mark player as unsold (auctioned=1 but not in any squad)
+    # The player is already marked auctioned when fetched by get_next_player()
+    # Just need to clear state and move on
+    bot.auction_manager._reset_player_state()
+    bot.auction_manager._save_state_to_db()
+
+    await interaction.response.send_message(
+        f"❌ Player **{player}** marked **UNSOLD**. Use `/reauction {player}` to bring back."
+    )
 
     await asyncio.sleep(1)
     await start_next_player(interaction.channel)
@@ -729,6 +754,48 @@ async def reauction_from_list(interaction: discord.Interaction, set_name: str):
     await interaction.response.send_message(
         f"✅ **{count} unsold players** from **{set_name}** have been added back to auction!"
     )
+
+
+@bot.tree.command(
+    name="reauctionmultiple",
+    description="Re-auction multiple specific players by name (Admin only)",
+)
+@app_commands.describe(
+    player_names="Comma-separated player names (e.g., Player1, Player2, Player3)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def reauction_multiple(interaction: discord.Interaction, player_names: str):
+    """Re-auction multiple specific players"""
+    await interaction.response.defer()
+
+    names = [n.strip() for n in player_names.split(",") if n.strip()]
+
+    if not names:
+        await interaction.followup.send("No player names provided.", ephemeral=True)
+        return
+
+    success_list = []
+    failed_list = []
+
+    for name in names:
+        success, msg = bot.auction_manager.reauction_player(name)
+        if success:
+            success_list.append(name)
+        else:
+            failed_list.append(f"{name}: {msg}")
+
+    result_msg = ""
+    if success_list:
+        result_msg += (
+            f"✅ **Re-auctioned ({len(success_list)}):** {', '.join(success_list)}\n"
+        )
+    if failed_list:
+        result_msg += f"❌ **Failed ({len(failed_list)}):**\n" + "\n".join(failed_list)
+
+    if not result_msg:
+        result_msg = "No players processed."
+
+    await interaction.followup.send(result_msg)
 
 
 # ============================================================
@@ -1235,16 +1302,20 @@ async def skip_set(interaction: discord.Interaction):
     name="announce", description="Send a custom announcement message (Admin only)"
 )
 @app_commands.describe(
+    title="The title/heading of the announcement (default: ANNOUNCEMENT)",
     message="The announcement message to display",
     mention_everyone="Whether to @everyone (default: False)",
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def announce(
-    interaction: discord.Interaction, message: str, mention_everyone: bool = False
+    interaction: discord.Interaction,
+    message: str,
+    title: str = "ANNOUNCEMENT",
+    mention_everyone: bool = False,
 ):
-    """Send a custom announcement message"""
+    """Send a custom announcement message with custom title"""
     embed = discord.Embed(
-        title="📢 ANNOUNCEMENT",
+        title=f"📢 {title.upper()}",
         description=message,
         color=discord.Color.blue(),
         timestamp=discord.utils.utcnow(),
@@ -1310,6 +1381,27 @@ async def set_purse(interaction: discord.Interaction, team: str, amount: int):
         )
     else:
         await interaction.response.send_message("Invalid amount.", ephemeral=True)
+
+
+@bot.tree.command(
+    name="resetpurses",
+    description="Reset all team purses to configured values (Admin only)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def reset_purses(interaction: discord.Interaction):
+    """Reset all team purses to the values from config.py"""
+    from config import TEAMS
+
+    reset_count = 0
+    for team_code, purse in TEAMS.items():
+        if bot.auction_manager.set_team_purse(team_code, purse):
+            reset_count += 1
+
+    msg = f"**Reset {reset_count} team purses to configured values:**\n```\n"
+    for team, purse in sorted(TEAMS.items()):
+        msg += f"{team:6} : {format_amount(purse)}\n"
+    msg += "```"
+    await interaction.response.send_message(msg)
 
 
 @bot.tree.command(
@@ -1393,57 +1485,85 @@ async def user_help_command(interaction: discord.Interaction):
 @bot.tree.command(name="adminhelp", description="Show commands for Admins")
 @app_commands.checks.has_permissions(administrator=True)
 async def admin_help_command(interaction: discord.Interaction):
-    help_text = """
-**Discord Auction Bot - Admin Commands**
+    """Show admin commands using embeds to avoid message length issues"""
 
-**Auction Control:**
-`/start` - Start the auction.
-`/stop` - Stop the auction completely.
-`/pause` - Pause the auction (stops timer, prevents next player).
-`/resume` - Resume the auction from where it left off.
-`/soldto TEAM` - Manually sell the current player to a team.
-`/unsold` - Mark the current player as unsold.
-`/skip` - Skip the current player (same as unsold).
-`/skipset` - ⭐ Skip entire current set and move to next.
-`/undobid` - Remove the last placed bid.
-`/rollback` - Undo the last completed sale.
-`/clear` - WIPE ALL DATA and reset.
+    embed1 = discord.Embed(
+        title="🔧 Admin Commands - Auction Control", color=discord.Color.blue()
+    )
+    embed1.add_field(
+        name="Auction Control",
+        value=(
+            "`/start` - Start auction\n"
+            "`/stop` - Stop auction\n"
+            "`/pause` - Pause auction\n"
+            "`/resume` - Resume auction\n"
+            "`/soldto TEAM` - Sell to team\n"
+            "`/unsold` - Mark unsold\n"
+            "`/skip` - Skip player\n"
+            "`/skipset` - Skip entire set\n"
+            "`/undobid` - Undo last bid\n"
+            "`/rollback` - Undo last sale\n"
+            "`/clear` - Reset all data"
+        ),
+        inline=False,
+    )
 
-**Team & Player Management:**
-`/assignteam @user TEAM` - Assign a user to a team.
-`/assignteams @user1:TEAM1, @user2:TEAM2` - ⭐ Bulk assign users.
-`/unassignteam @user` - Remove a user from a team.
-`/setpurse TEAM amount` - Manually adjust a team's purse.
-`/addtosquad TEAM player price` - Add player to team (price in Cr).
-`/release TEAM player` - Remove a player from a team (refunds money).
-`/releasemultiple TEAM1:Player1, TEAM2:Player2` - ⭐ Bulk release players.
-`/trade player from_team to_team price` - Move player (price in Cr).
+    embed2 = discord.Embed(
+        title="👥 Admin Commands - Team Management", color=discord.Color.green()
+    )
+    embed2.add_field(
+        name="Team & Player Management",
+        value=(
+            "`/assignteam @user TEAM` - Assign user\n"
+            "`/assignteams` - Bulk assign users\n"
+            "`/unassignteam @user` - Remove user\n"
+            "`/setpurse TEAM amount` - Set purse\n"
+            "`/addtosquad TEAM player price` - Add player\n"
+            "`/release TEAM player` - Release player\n"
+            "`/releasemultiple` - Bulk release\n"
+            "`/trade player from to price` - Trade player"
+        ),
+        inline=False,
+    )
 
-**Re-Auction (Unsold Players):**
-`/showunsold` - View all unsold players.
-`/reauction player` - Bring ONE unsold player back to auction.
-`/reauctionall` - Bring ALL unsold players back to auction.
-`/reauctionlist set_name` - Bring back unsold players from a specific set.
+    embed3 = discord.Embed(
+        title="📋 Admin Commands - Lists & Settings", color=discord.Color.orange()
+    )
+    embed3.add_field(
+        name="Re-Auction",
+        value=(
+            "`/showunsold` - View unsold\n"
+            "`/reauction player` - Re-auction one\n"
+            "`/reauctionmultiple` - Re-auction many\n"
+            "`/reauctionall` - Re-auction all\n"
+            "`/reauctionlist set` - Re-auction set"
+        ),
+        inline=True,
+    )
+    embed3.add_field(
+        name="List Management",
+        value=(
+            "`/loadsets max_set` - Load sets\n"
+            "`/addplayer` - Add player\n"
+            "`/addplayers` - Add multiple\n"
+            "`/removeplayers` - Remove multiple\n"
+            "`/deleteset` - Delete set"
+        ),
+        inline=True,
+    )
+    embed3.add_field(
+        name="Settings & Communication",
+        value=(
+            "`/setcountdown secs` - Timer duration\n"
+            "`/setstatschannel #ch` - Stats channel\n"
+            "`/announce title msg` - Announcement"
+        ),
+        inline=False,
+    )
 
-**List Management:**
-`/loadsets max_set` - Load players from Excel (Sets 1-67).
-`/addplayer list player price` - Add a player (price in Cr, default 0.2).
-`/addplayers list "Name1:Price1, Name2:Price2"` - Add multiple players.
-`/removeplayers list "Player1, Player2"` - ⭐ Remove multiple players.
-`/setorder list1 list2` - Set the order of player lists.
-`/deleteset set_name` - Delete a set and all its players.
-`/showlists` - View lists (paginated with ◀ ▶ buttons).
-
-**Communication:**
-`/announce message` - ⭐ Send custom announcement with embed.
-
-**Settings:**
-`/setcountdown seconds` - Change the bid timer duration.
-`/setstatschannel #channel` - Set the channel for the live leaderboard.
-
-*⭐ = New command*
-"""
-    await interaction.response.send_message(help_text, ephemeral=True)
+    await interaction.response.send_message(
+        embeds=[embed1, embed2, embed3], ephemeral=True
+    )
 
 
 # ============================================================

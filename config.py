@@ -35,6 +35,21 @@ TEAMS = {
     "LSG": 229500000,  # 22.95 Cr remaining
 }
 
+# Team Slot Configuration - Overseas and Total slots available
+# Source: Official IPL 2026 data
+TEAM_SLOTS = {
+    "CSK": {"overseas": 4, "total": 9},
+    "DC": {"overseas": 5, "total": 8},
+    "GT": {"overseas": 4, "total": 5},
+    "KKR": {"overseas": 6, "total": 13},
+    "LSG": {"overseas": 4, "total": 6},
+    "MI": {"overseas": 1, "total": 5},
+    "PBKS": {"overseas": 2, "total": 4},
+    "RCB": {"overseas": 2, "total": 8},
+    "RR": {"overseas": 1, "total": 9},
+    "SRH": {"overseas": 2, "total": 10},
+}
+
 
 # Bid Increment Rules
 def get_bid_increment(current_bid: int) -> int:

@@ -221,5 +221,10 @@ def get_total_retained_cost(team_code: str) -> int:
 
 
 def get_remaining_purse(team_code: str, initial_purse: int) -> int:
-    """Calculate remaining purse after retaining players"""
-    return initial_purse - get_total_retained_cost(team_code)
+    """Return the purse as-is since TEAMS config already has remaining purse values
+
+    NOTE: The TEAMS config in config.py already contains the REMAINING purse
+    after retained players have been deducted. We should NOT subtract again.
+    This function now simply returns the initial_purse passed to it.
+    """
+    return initial_purse
