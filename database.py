@@ -323,6 +323,28 @@ class Database:
             )
             return True
 
+    def remove_player_from_list(self, list_name: str, player_name: str) -> bool:
+        """Remove a player from a list by name (case-insensitive).
+        Returns True if player was found and removed."""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM player_lists WHERE LOWER(list_name) = LOWER(?) AND LOWER(player_name) = LOWER(?) AND auctioned = 0",
+                (list_name, player_name),
+            )
+            return cursor.rowcount > 0
+
+    def mark_set_as_auctioned(self, set_name: str) -> int:
+        """Mark all unauctioned players in a set as auctioned (skipped/unsold).
+        Returns the number of players marked."""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE player_lists SET auctioned = 1 WHERE LOWER(list_name) = LOWER(?) AND auctioned = 0",
+                (set_name,),
+            )
+            return cursor.rowcount
+
     def add_players_to_list(
         self, list_name: str, players: List[Tuple[str, Optional[int]]]
     ):

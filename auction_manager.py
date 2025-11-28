@@ -20,7 +20,7 @@ from config import (
     NO_START_TIMEOUT,
     PLAYER_GAP,
     LIST_GAP,
-    DEFAULT_CSV_FILE,
+    DEFAULT_AUCTION_FILE,
     TEAMS,
     get_bid_increment,
 )
@@ -101,11 +101,20 @@ class AuctionManager:
     def _auto_load_csv_players(self):
         pass
 
-    def _load_ipl_csv(
+    def _load_auction_excel(
         self, filepath: str, max_set: Optional[int] = None
     ) -> Tuple[bool, str]:
-        """Robust loader for IPL CSVs with Set Name support. Supports incremental loading."""
-        import csv
+        """
+        Load players from Excel file (Auction_list.xlsx).
+
+        Expected columns:
+        - Column A: Player NO. (integer)
+        - Column B: SET NO (1-67)
+        - Column C: SET (e.g., "BA1") - used as set name
+        - Column D: PLAYER (player name)
+        - Column E: BASE (in Lakhs, e.g., 100 = 1 Cr)
+        """
+        from openpyxl import load_workbook
 
         try:
             # Get existing lists to avoid duplicates
@@ -113,175 +122,157 @@ class AuctionManager:
             existing_set_names = set(existing_lists.keys()) if existing_lists else set()
 
             players_by_set = {}
-            set_number_map = {}  # Stores {list_name: set_number} for sorting
+            set_number_map = {}  # Stores {set_name: set_number} for sorting
             row_count = 0
             skipped_count = 0
-            header = None
-            header_map = {}
 
-            with open(filepath, "r", encoding="utf-8-sig") as f:
-                reader = csv.reader(f)
-                for raw_row in reader:
-                    row_count += 1
-                    row = [cell.strip() if cell is not None else "" for cell in raw_row]
+            # Load Excel workbook
+            wb = load_workbook(filepath, read_only=True, data_only=True)
+            ws = wb.active
 
-                    if not any(cell for cell in row):
-                        skipped_count += 1
-                        continue
+            # Find header row and column indices
+            header_row = None
+            col_indices = {}
 
-                    # Header Detection
-                    if header is None:
-                        low_cells = [c.lower() for c in row if c]
-                        if (
-                            any("first name" in c for c in low_cells)
-                            or any("list sr" in c for c in low_cells)
-                            or any("2025 set" in c for c in low_cells)
-                        ):
-                            header = row
-                            for i, col in enumerate(header):
-                                if not col:
-                                    continue
-                                key = col.lower().strip()
-                                key = re.sub(r"[\s\._\-]+", "", key)
-                                header_map[key] = i
-                            continue
-                        else:
-                            skipped_count += 1
-                            continue
+            for row_idx, row in enumerate(
+                ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1
+            ):
+                if row is None:
+                    continue
+                # Check if this row contains headers
+                row_str = [str(cell).strip().upper() if cell else "" for cell in row]
 
-                    # Skip repeated headers
-                    first_cell = row[0].lower() if row and row[0] else ""
-                    if any(
-                        h in first_cell
-                        for h in (
-                            "list sr.no",
-                            "list sr.no.",
-                            "list sr",
-                            "first name",
-                            "tata ipl",
-                            "auction list",
-                        )
-                    ):
-                        skipped_count += 1
-                        continue
+                # Look for key columns
+                for col_idx, cell_val in enumerate(row_str):
+                    if "PLAYER NO" in cell_val or cell_val == "PLAYER NO.":
+                        col_indices["player_no"] = col_idx
+                    elif cell_val == "SET NO" or cell_val == "SET NO.":
+                        col_indices["set_no"] = col_idx
+                    elif cell_val == "SET" and "SET NO" not in cell_val:
+                        col_indices["set"] = col_idx
+                    elif cell_val == "PLAYER":
+                        col_indices["player"] = col_idx
+                    elif cell_val == "BASE":
+                        col_indices["base"] = col_idx
 
-                    # Helper to get column
-                    def get_col(*names):
-                        for name in names:
-                            n = re.sub(r"[\s\._\-]+", "", name.lower())
-                            idx = header_map.get(n)
-                            if idx is not None and idx < len(row):
-                                return row[idx]
-                        return ""
+                # If we found the key columns, this is the header row
+                if "set_no" in col_indices and "player" in col_indices:
+                    header_row = row_idx
+                    break
 
-                    # Extract fields
-                    first_name = get_col("First Name", "Firstname", "Player Name")
-                    surname = get_col("Surname", "Last Name", "Lastname")
-                    set_no_str = get_col("Set No.", "Set No", "SetNo", "Set")
-                    set_name_str = get_col(
-                        "Set Name", "SetName", "Set Desc", "Definition"
-                    )
-                    base_price_str = get_col(
-                        "Base Price", "BasePrice", "Base Price (Lakh)", "Baseprice"
-                    )
-                    list_sr_no = get_col(
-                        "List Sr.No.",
-                        "List Sr.No",
-                        "List Sr No",
-                        "ListSrNo",
-                        "Sr.No.",
-                        "Sr. No.",
-                    )
-
-                    # Validation
-                    if not first_name:
-                        skipped_count += 1
-                        continue
-
-                    fn_lower = first_name.lower()
-                    if (
-                        fn_lower in ("first name", "player name", "name")
-                        or "tata ipl" in fn_lower
-                        or "auction list" in fn_lower
-                    ):
-                        skipped_count += 1
-                        continue
-
-                    if first_name.replace(".", "").replace(" ", "").isdigit():
-                        skipped_count += 1
-                        continue
-
-                    if not set_no_str:
-                        skipped_count += 1
-                        continue
-
-                    # Parse Set Number (Required for ordering/filtering)
-                    try:
-                        set_number = int(float(set_no_str.replace(",", "")))
-                    except (ValueError, TypeError):
-                        skipped_count += 1
-                        continue
-
-                    if max_set is not None and set_number > max_set:
-                        skipped_count += 1
-                        continue
-
-                    # Parse ID
-                    if not list_sr_no:
-                        skipped_count += 1
-                        continue
-                    try:
-                        float(list_sr_no.replace(",", ""))
-                    except Exception:
-                        skipped_count += 1
-                        continue
-
-                    player_name = f"{first_name} {surname}".strip()
-
-                    # Parse Price
-                    base_price = DEFAULT_BASE_PRICE
-                    if base_price_str:
-                        try:
-                            clean = re.sub(r"[^\d\.]", "", base_price_str)
-                            if clean:
-                                val = float(clean)
-                                if val < 10000:
-                                    base_price = int(val * 100000)
-                                else:
-                                    base_price = int(val)
-                        except Exception:
-                            base_price = DEFAULT_BASE_PRICE
-
-                    # DETERMINE SET NAME (KEY)
-                    # Use 2025 Set column value (like M1, M2, BA1) as set name
-                    set_2025_str = get_col("2025 Set", "2025Set", "2025set")
-                    if set_2025_str:
-                        set_key = set_2025_str.strip()
-                    elif set_name_str:
-                        set_key = set_name_str.strip()
-                    else:
-                        set_key = f"Set {set_number}"
-
-                    # Skip if this set already exists with players
-                    if set_key.lower() in existing_set_names:
-                        skipped_count += 1
-                        continue
-
-                    # Group players
-                    if set_key not in players_by_set:
-                        players_by_set[set_key] = []
-                        set_number_map[set_key] = (
-                            set_number  # Map name to number for sorting
-                        )
-                        try:
-                            self.db.create_list(set_key)
-                        except Exception:
-                            pass
-
-                    players_by_set[set_key].append((player_name, base_price))
+            if header_row is None:
+                # Default to first row as header, standard column positions
+                header_row = 1
+                col_indices = {
+                    "player_no": 0,  # Column A
+                    "set_no": 1,  # Column B
+                    "set": 2,  # Column C
+                    "player": 3,  # Column D
+                    "base": 4,  # Column E
+                }
 
             logger.info(
-                f"CSV Parsing Summary: {row_count} rows read, {skipped_count} skipped, {len(players_by_set)} new sets"
+                f"Excel header found at row {header_row}, columns: {col_indices}"
+            )
+
+            # Process data rows
+            for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+                row_count += 1
+
+                if row is None or not any(row):
+                    skipped_count += 1
+                    continue
+
+                # Extract values using column indices
+                set_no_val = (
+                    row[col_indices.get("set_no", 1)]
+                    if col_indices.get("set_no", 1) < len(row)
+                    else None
+                )
+                set_name_val = (
+                    row[col_indices.get("set", 2)]
+                    if col_indices.get("set", 2) < len(row)
+                    else None
+                )
+                player_name_val = (
+                    row[col_indices.get("player", 3)]
+                    if col_indices.get("player", 3) < len(row)
+                    else None
+                )
+                base_val = (
+                    row[col_indices.get("base", 4)]
+                    if col_indices.get("base", 4) < len(row)
+                    else None
+                )
+
+                # Validate player name
+                if not player_name_val:
+                    skipped_count += 1
+                    continue
+
+                player_name = str(player_name_val).strip()
+                if not player_name or player_name.upper() in (
+                    "PLAYER",
+                    "NAME",
+                    "PLAYER NAME",
+                ):
+                    skipped_count += 1
+                    continue
+
+                # Parse Set Number
+                if set_no_val is None:
+                    skipped_count += 1
+                    continue
+
+                try:
+                    set_number = int(float(str(set_no_val).replace(",", "")))
+                except (ValueError, TypeError):
+                    skipped_count += 1
+                    continue
+
+                # Apply max_set filter
+                if max_set is not None and set_number > max_set:
+                    skipped_count += 1
+                    continue
+
+                # Determine Set Name (use SET column, e.g., "BA1")
+                if set_name_val:
+                    set_key = str(set_name_val).strip()
+                else:
+                    set_key = f"Set {set_number}"
+
+                # Skip if this set already exists
+                if set_key.lower() in existing_set_names:
+                    skipped_count += 1
+                    continue
+
+                # Parse Base Price (in Lakhs -> convert to Rupees)
+                base_price = DEFAULT_BASE_PRICE
+                if base_val is not None:
+                    try:
+                        clean_val = str(base_val).replace(",", "").strip()
+                        if clean_val:
+                            lakhs = float(clean_val)
+                            # Convert Lakhs to Rupees (1 Lakh = 100,000)
+                            base_price = int(lakhs * 100000)
+                    except (ValueError, TypeError):
+                        base_price = DEFAULT_BASE_PRICE
+
+                # Group players by set
+                if set_key not in players_by_set:
+                    players_by_set[set_key] = []
+                    set_number_map[set_key] = set_number
+                    try:
+                        self.db.create_list(set_key)
+                    except Exception:
+                        pass
+
+                players_by_set[set_key].append((player_name, base_price))
+
+            wb.close()
+
+            logger.info(
+                f"Excel Parsing Summary: {row_count} rows read, {skipped_count} skipped, {len(players_by_set)} new sets"
             )
             if max_set:
                 logger.info(f"Max set filter: 1 to {max_set}")
@@ -302,11 +293,10 @@ class AuctionManager:
 
             # Update list order to include new sets (merge with existing)
             if players_by_set:
-                # Get existing order
                 existing_order = self.db.get_list_order()
                 existing_order_set = set(existing_order)
 
-                # Add new sets sorted by their set number
+                # Sort new sets by their set number
                 new_sets_sorted = sorted(
                     players_by_set.keys(), key=lambda k: set_number_map.get(k, 999)
                 )
@@ -329,13 +319,13 @@ class AuctionManager:
             )
 
         except FileNotFoundError:
-            return False, f"CSV file not found: {filepath}"
+            return False, f"Excel file not found: {filepath}"
         except Exception as e:
             import traceback
 
             error_details = traceback.format_exc()
-            logger.error(f"Error loading CSV: {error_details}")
-            return False, f"Error loading CSV: {str(e)}"
+            logger.error(f"Error loading Excel: {error_details}")
+            return False, f"Error loading Excel: {str(e)}"
 
     def _load_state_from_db(self):
         state = self.db.get_auction_state()
@@ -419,15 +409,15 @@ class AuctionManager:
         import os
 
         if filepath is None:
-            filepath = os.path.join(os.path.dirname(__file__), DEFAULT_CSV_FILE)
+            filepath = os.path.join(os.path.dirname(__file__), DEFAULT_AUCTION_FILE)
 
         if not os.path.exists(filepath):
-            return False, f"CSV file not found: {filepath}"
+            return False, f"Excel file not found: {filepath}"
 
-        if max_set < 1 or max_set > 79:
-            return False, "max_set must be between 1 and 79"
+        if max_set < 1 or max_set > 67:
+            return False, "max_set must be between 1 and 67"
 
-        return self._load_ipl_csv(filepath, max_set=max_set)
+        return self._load_auction_excel(filepath, max_set=max_set)
 
     def set_list_order(self, order: List[str]) -> Tuple[bool, str]:
         order_lower = [name.lower() for name in order]
@@ -445,6 +435,49 @@ class AuctionManager:
         """Delete a set/list and all its players from the auction"""
         set_name_lower = set_name.lower()
         return self.db.delete_set(set_name_lower)
+
+    def remove_players_from_list(
+        self, list_name: str, player_names: List[str]
+    ) -> Tuple[List[str], List[str]]:
+        """Remove multiple players from a list.
+
+        Returns:
+            Tuple of (removed_players, not_found_players)
+        """
+        list_name_lower = list_name.lower()
+        removed = []
+        not_found = []
+
+        for player_name in player_names:
+            success = self.db.remove_player_from_list(list_name_lower, player_name)
+            if success:
+                removed.append(player_name)
+            else:
+                not_found.append(player_name)
+
+        return removed, not_found
+
+    def skip_current_set(self) -> int:
+        """Skip all remaining players in current set and move to next set.
+
+        Returns:
+            Number of players skipped (marked as auctioned/unsold)
+        """
+        current_list = self.get_current_list_name()
+        if not current_list:
+            return 0
+
+        # Mark all remaining unauctioned players in this set as auctioned
+        skipped_count = self.db.mark_set_as_auctioned(current_list)
+
+        # Clear current player state
+        self._reset_player_state()
+
+        # Advance to next set
+        self.current_list_index += 1
+        self._save_state_to_db()
+
+        return skipped_count
 
     # ==================== AUCTION CONTROL ====================
 
@@ -518,8 +551,7 @@ class AuctionManager:
         """
         Get the next player. Safely handles state to avoid re-auctioning active player.
         """
-        # CRITICAL FIX: If resume called while player is active, return that player
-        # This prevents "Double Sold" bug on resume
+        # CRITICAL FIX: If current_player is set, check if they're already processed
         if self.current_player:
             # Check if this player is already in a squad (sold)
             squads = self.db.get_all_squads()
@@ -529,13 +561,22 @@ class AuctionManager:
                     if pname.lower() == self.current_player.lower():
                         is_sold = True
                         break
+                if is_sold:
+                    break
 
-            if not is_sold:
-                # Player is active but not sold - just continue with them
-                return (True, self.current_player, self.base_price, False)
-            else:
-                # Player was marked sold in DB but state wasn't cleared. Clear and move next.
+            # Also check if player was already auctioned (unsold case)
+            is_auctioned = False
+            player_info = self.db.find_player_by_name(self.current_player)
+            if player_info:
+                # player_info = (id, player_name, list_name, base_price, auctioned)
+                is_auctioned = bool(player_info[4])
+
+            if is_sold or is_auctioned:
+                # Player was already processed (sold or marked unsold) - clear state and move on
                 self._reset_player_state()
+            else:
+                # Player is active but not yet processed - continue with them
+                return (True, self.current_player, self.base_price, False)
 
         list_order = self.db.get_list_order()
 

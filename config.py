@@ -15,23 +15,24 @@ PLAYER_GAP = 20  # seconds gap between players
 LIST_GAP = 20  # seconds gap between lists
 MANUAL_SELL_COOLDOWN = 15  # seconds - minimum time before admin can /soldto
 DEFAULT_BASE_PRICE = 2000000  # 20 Lakh base price
-DEFAULT_PURSE = 1200000000  # 120 Crore per team (120 * 10^7)
+DEFAULT_PURSE = 1250000000  # 125 Crore per team (to accommodate all retained players)
 
-# CSV File Path
-DEFAULT_CSV_FILE = "1731674068078_TATA IPL 2025- Auction List -15.11.24.csv"
+# Auction Data File Path (Excel)
+DEFAULT_AUCTION_FILE = "Auction_list.xlsx"
 
-# Team Configuration
+# Team Configuration - Using official IPL 2026 remaining purse values
+# Source: Official IPL 2026 Salary Cap data
 TEAMS = {
-    "MI": DEFAULT_PURSE,
-    "CSK": DEFAULT_PURSE,
-    "RCB": DEFAULT_PURSE,
-    "KKR": DEFAULT_PURSE,
-    "SRH": DEFAULT_PURSE,
-    "RR": DEFAULT_PURSE,
-    "DC": DEFAULT_PURSE,
-    "PBKS": DEFAULT_PURSE,
-    "GT": DEFAULT_PURSE,
-    "LSG": DEFAULT_PURSE,
+    "MI": 27500000,  # 2.75 Cr remaining
+    "CSK": 434000000,  # 43.4 Cr remaining
+    "RCB": 164000000,  # 16.4 Cr remaining
+    "KKR": 643000000,  # 64.3 Cr remaining
+    "SRH": 255000000,  # 25.5 Cr remaining
+    "RR": 160500000,  # 16.05 Cr remaining
+    "DC": 218000000,  # 21.8 Cr remaining
+    "PBKS": 115000000,  # 11.5 Cr remaining
+    "GT": 129000000,  # 12.9 Cr remaining
+    "LSG": 229500000,  # 22.95 Cr remaining
 }
 
 

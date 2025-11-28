@@ -157,6 +157,69 @@ async def assign_team(interaction: discord.Interaction, user: discord.User, team
 
 
 @bot.tree.command(
+    name="assignteams",
+    description="Assign multiple users to teams at once (Admin only)",
+)
+@app_commands.describe(
+    assignments="Format: @user1:TEAM1, @user2:TEAM2 (e.g., @John:MI, @Jane:CSK)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def assign_teams_bulk(interaction: discord.Interaction, assignments: str):
+    """Assign multiple users to teams at once"""
+    await interaction.response.defer()
+
+    # Parse assignments - we need to extract user mentions and teams
+    # Format: @user:TEAM, @user2:TEAM2
+    entries = [e.strip() for e in assignments.split(",") if e.strip()]
+
+    assigned = []
+    failed = []
+
+    for entry in entries:
+        if ":" not in entry:
+            failed.append(f"{entry} (invalid format)")
+            continue
+
+        parts = entry.rsplit(":", 1)
+        user_part = parts[0].strip()
+        team_part = parts[1].strip().upper()
+
+        # Check if team is valid
+        if team_part not in TEAMS:
+            failed.append(f"{entry} (invalid team {team_part})")
+            continue
+
+        # Try to extract user ID from mention
+        # Mentions look like <@123456789> or <@!123456789>
+        import re
+
+        match = re.search(r"<@!?(\d+)>", user_part)
+        if match:
+            user_id = int(match.group(1))
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            if user:
+                bot.auction_manager.db.set_user_team(
+                    user.id, team_part, user.display_name
+                )
+                bot.user_teams[user.id] = team_part
+                assigned.append(f"{user.display_name} → {team_part}")
+            else:
+                failed.append(f"{entry} (user not found)")
+        else:
+            failed.append(f"{entry} (invalid user mention)")
+
+    msg = f"**Assigned {len(assigned)} users to teams:**\n"
+    if assigned:
+        msg += "\n".join(f"✅ {a}" for a in assigned)
+    if failed:
+        msg += f"\n\n**Failed ({len(failed)}):**\n" + "\n".join(
+            f"❌ {f}" for f in failed
+        )
+
+    await interaction.followup.send(msg)
+
+
+@bot.tree.command(
     name="unassignteam", description="Remove a user's team assignment (Admin only)"
 )
 @app_commands.describe(user="The user to unassign")
@@ -228,10 +291,15 @@ async def bid(interaction: discord.Interaction):
     )
 
     if not result.success:
-        await interaction.response.send_message(result.message, ephemeral=True)
+        # Enhanced error feedback with embed
+        error_embed = discord.Embed(
+            title="❌ Bid Failed", description=result.message, color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=error_embed, ephemeral=True)
         return
 
     player = bot.auction_manager.current_player
+    current_set = bot.auction_manager.get_current_list_name()
 
     if result.auto_bids_triggered:
         await interaction.response.send_message(
@@ -239,18 +307,41 @@ async def bid(interaction: discord.Interaction):
             ephemeral=True,
         )
 
-        msg = f"**{team}** bid **{format_amount(result.original_bid_amount)}**...\n"
-        msg += f"⚡ **BUT WAS IMMEDIATELY OUTBID!**\n\n"
-        for auto_bid in result.auto_bids_triggered:
-            msg += f"• **{auto_bid['team']}** auto-bid: **{format_amount(auto_bid['amount'])}**\n"
-        msg += f"\n🏆 Current winner: **{result.team}** at **{format_amount(result.amount)}**"
-        await interaction.channel.send(msg)
+        # Enhanced auto-bid notification with embed
+        embed = discord.Embed(
+            title="⚡ AUTO-BID TRIGGERED!", color=discord.Color.orange()
+        )
+        embed.add_field(
+            name="Initial Bid",
+            value=f"**{team}** bid {format_amount(result.original_bid_amount)}",
+            inline=False,
+        )
+        auto_bid_text = "\n".join(
+            f"• **{ab['team']}**: {format_amount(ab['amount'])}"
+            for ab in result.auto_bids_triggered
+        )
+        embed.add_field(name="Auto-Bids", value=auto_bid_text, inline=False)
+        embed.add_field(
+            name="🏆 Current Leader",
+            value=f"**{result.team}** at **{format_amount(result.amount)}**",
+            inline=False,
+        )
+        await interaction.channel.send(embed=embed)
     else:
         await interaction.response.send_message(
             f"✅ Bid placed: **{format_amount(result.amount)}**", ephemeral=True
         )
-        bid_msg = bot.formatter.format_bid_message(result.team, result.amount, player)
-        await interaction.channel.send(bid_msg)
+
+        # Enhanced bid message with embed
+        bid_embed = discord.Embed(title=f"💰 New Bid!", color=discord.Color.green())
+        bid_embed.add_field(name="Team", value=f"**{result.team}**", inline=True)
+        bid_embed.add_field(
+            name="Amount", value=f"**{format_amount(result.amount)}**", inline=True
+        )
+        bid_embed.add_field(name="Player", value=f"**{player}**", inline=True)
+        if current_set:
+            bid_embed.set_footer(text=f"Set: {current_set.upper()}")
+        await interaction.channel.send(embed=bid_embed)
 
     # Update stats
     asyncio.create_task(bot.update_stats_display())
@@ -381,6 +472,52 @@ async def release_player(interaction: discord.Interaction, team: str, player: st
     if success:
         asyncio.create_task(bot.update_stats_display())
     await interaction.response.send_message(message, ephemeral=not success)
+
+
+@bot.tree.command(
+    name="releasemultiple",
+    description="Release multiple players from teams (Admin only)",
+)
+@app_commands.describe(
+    releases="Format: Team1:Player1, Team2:Player2 (e.g., MI:Rohit, CSK:Dhoni)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def release_multiple(interaction: discord.Interaction, releases: str):
+    """Release multiple players from teams at once - Admin can use before/during auction"""
+    await interaction.response.defer()
+
+    entries = [e.strip() for e in releases.split(",") if e.strip()]
+
+    released = []
+    failed = []
+
+    for entry in entries:
+        if ":" not in entry:
+            failed.append(f"{entry} (invalid format, use TEAM:Player)")
+            continue
+
+        parts = entry.split(":", 1)
+        team = parts[0].strip().upper()
+        player = parts[1].strip()
+
+        success, message = bot.auction_manager.release_retained_player(team, player)
+        if success:
+            released.append(f"{team}: {player}")
+        else:
+            failed.append(f"{team}:{player} ({message})")
+
+    msg = f"**Released {len(released)} players:**\n"
+    if released:
+        msg += "\n".join(f"✅ {r}" for r in released)
+    if failed:
+        msg += f"\n\n**Failed ({len(failed)}):**\n" + "\n".join(
+            f"❌ {f}" for f in failed[:10]
+        )
+
+    if released:
+        asyncio.create_task(bot.update_stats_display())
+
+    await interaction.followup.send(msg)
 
 
 @bot.tree.command(
@@ -687,6 +824,48 @@ async def add_players_bulk(
 
 
 @bot.tree.command(
+    name="removeplayers", description="Remove multiple players from a list (Admin only)"
+)
+@app_commands.describe(
+    list_name="Name of the list to remove players from",
+    players="Player names separated by commas (e.g., Player1, Player2, Player3)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def remove_players_bulk(
+    interaction: discord.Interaction, list_name: str, players: str
+):
+    """Remove multiple players from a list at once"""
+    if bot.auction_manager.active:
+        await interaction.response.send_message(
+            "Cannot remove players while auction is active.", ephemeral=True
+        )
+        return
+
+    player_names = [p.strip() for p in players.split(",") if p.strip()]
+    if not player_names:
+        await interaction.response.send_message(
+            "Please provide player names separated by commas.", ephemeral=True
+        )
+        return
+
+    removed, not_found = bot.auction_manager.remove_players_from_list(
+        list_name, player_names
+    )
+
+    msg = f"**Removed {len(removed)} players from '{list_name}':**\n"
+    if removed:
+        msg += "\n".join(f"✅ {p}" for p in removed[:20])
+        if len(removed) > 20:
+            msg += f"\n... and {len(removed) - 20} more"
+    if not_found:
+        msg += f"\n\n**Not found ({len(not_found)}):** {', '.join(not_found[:10])}"
+        if len(not_found) > 10:
+            msg += f" ... and {len(not_found) - 10} more"
+
+    await interaction.response.send_message(msg)
+
+
+@bot.tree.command(
     name="loadcsv", description="Load players from a CSV file (Admin only)"
 )
 @app_commands.describe(list_name="Name of the list", filepath="Full path to CSV file")
@@ -699,16 +878,17 @@ async def load_csv(interaction: discord.Interaction, list_name: str, filepath: s
 
 
 @bot.tree.command(
-    name="loadsets", description="Load players from IPL CSV by set number (Admin only)"
+    name="loadsets",
+    description="Load players from IPL Excel by set number (Admin only)",
 )
-@app_commands.describe(max_set="Load players from sets 1 to this number (1-79)")
+@app_commands.describe(max_set="Load players from sets 1 to this number (1-67)")
 @app_commands.checks.has_permissions(administrator=True)
 async def load_sets(interaction: discord.Interaction, max_set: int):
     await interaction.response.defer()
 
-    if max_set < 1 or max_set > 79:
+    if max_set < 1 or max_set > 67:
         await interaction.followup.send(
-            "max_set must be between 1 and 79", ephemeral=True
+            "max_set must be between 1 and 67", ephemeral=True
         )
         return
 
@@ -716,15 +896,138 @@ async def load_sets(interaction: discord.Interaction, max_set: int):
     await interaction.followup.send(message)
 
 
+# ============================================================
+# PAGINATED SHOWLISTS VIEW
+# ============================================================
+
+
+class ShowListsView(discord.ui.View):
+    """Paginated view for /showlists with next/previous buttons"""
+
+    def __init__(self, pages: list, user_id: int):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.pages = pages
+        self.current_page = 0
+        self.user_id = user_id
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.prev_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page >= len(self.pages) - 1
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def prev_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This is not your menu!", ephemeral=True
+            )
+            return
+
+        self.current_page = max(0, self.current_page - 1)
+        self.update_buttons()
+        await interaction.response.edit_message(
+            content=self.pages[self.current_page], view=self
+        )
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This is not your menu!", ephemeral=True
+            )
+            return
+
+        self.current_page = min(len(self.pages) - 1, self.current_page + 1)
+        self.update_buttons()
+        await interaction.response.edit_message(
+            content=self.pages[self.current_page], view=self
+        )
+
+
+def paginate_lists_by_set(
+    player_lists: dict, list_order: list, max_chars: int = 1800
+) -> list:
+    """Paginate lists keeping each set together on a page"""
+    pages = []
+    current_page = "**📋 Player Lists:**\n"
+
+    # Process in order
+    processed = set()
+    for list_name in list_order:
+        if list_name in player_lists:
+            players = player_lists[list_name]
+            set_content = f"\n**{list_name.upper()}** ({len(players)} players):\n```\n"
+            for player_name, base_price in players[:15]:  # Show first 15
+                price_str = format_amount(base_price) if base_price else "20L"
+                set_content += f"  {player_name:30} | {price_str}\n"
+            if len(players) > 15:
+                set_content += f"  ... and {len(players) - 15} more\n"
+            set_content += "```"
+
+            # If adding this set would exceed limit, start new page
+            if (
+                len(current_page) + len(set_content) > max_chars
+                and current_page != "**📋 Player Lists:**\n"
+            ):
+                pages.append(current_page)
+                current_page = "**📋 Player Lists (cont.):**\n"
+
+            current_page += set_content
+            processed.add(list_name)
+
+    # Handle lists not in order
+    for list_name, players in player_lists.items():
+        if list_name not in processed:
+            set_content = f"\n**{list_name.upper()}** ({len(players)} players):\n```\n"
+            for player_name, base_price in players[:15]:
+                price_str = format_amount(base_price) if base_price else "20L"
+                set_content += f"  {player_name:30} | {price_str}\n"
+            if len(players) > 15:
+                set_content += f"  ... and {len(players) - 15} more\n"
+            set_content += "```"
+
+            if (
+                len(current_page) + len(set_content) > max_chars
+                and current_page != "**📋 Player Lists:**\n"
+            ):
+                pages.append(current_page)
+                current_page = "**📋 Player Lists (cont.):**\n"
+
+            current_page += set_content
+
+    if current_page.strip() and current_page != "**📋 Player Lists:**\n":
+        pages.append(current_page)
+
+    if not pages:
+        pages.append("No player lists created yet.")
+
+    # Add page numbers
+    for i, page in enumerate(pages):
+        pages[i] = page + f"\n\n*Page {i+1}/{len(pages)}*"
+
+    return pages
+
+
 @bot.tree.command(name="showlists", description="Display all lists and their contents")
 async def show_lists(interaction: discord.Interaction):
-    info = bot.auction_manager.get_list_info()
-    if len(info) > 2000:
-        await interaction.response.send_message(info[:2000])
-        for chunk in [info[i : i + 2000] for i in range(2000, len(info), 2000)]:
-            await interaction.followup.send(chunk)
+    player_lists = bot.auction_manager.player_lists
+    list_order = bot.auction_manager.list_order
+
+    if not player_lists:
+        await interaction.response.send_message("No player lists created yet.")
+        return
+
+    pages = paginate_lists_by_set(player_lists, list_order)
+
+    if len(pages) == 1:
+        await interaction.response.send_message(pages[0])
     else:
-        await interaction.response.send_message(info)
+        view = ShowListsView(pages, interaction.user.id)
+        await interaction.response.send_message(pages[0], view=view)
 
 
 @bot.tree.command(
@@ -894,6 +1197,64 @@ async def skip_player(interaction: discord.Interaction):
     await start_next_player(interaction.channel)
 
 
+@bot.tree.command(
+    name="skipset", description="Skip current set and move to next set (Admin only)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def skip_set(interaction: discord.Interaction):
+    """Skip all remaining players in current set and move to next set"""
+    if not bot.auction_manager.active:
+        await interaction.response.send_message("No active auction.", ephemeral=True)
+        return
+
+    current_set = bot.auction_manager.get_current_list_name()
+    if not current_set:
+        await interaction.response.send_message(
+            "No current set to skip.", ephemeral=True
+        )
+        return
+
+    # Mark all unauctioned players in current set as auctioned (unsold)
+    skipped_count = bot.auction_manager.skip_current_set()
+
+    if bot.countdown_task:
+        bot.countdown_task.cancel()
+        bot.countdown_task = None
+
+    await interaction.response.send_message(
+        f"⏭️ **Skipped set {current_set.upper()}!**\n"
+        f"{skipped_count} remaining players marked as unsold.\n"
+        f"Moving to next set..."
+    )
+
+    await asyncio.sleep(2)
+    await start_next_player(interaction.channel)
+
+
+@bot.tree.command(
+    name="announce", description="Send a custom announcement message (Admin only)"
+)
+@app_commands.describe(
+    message="The announcement message to display",
+    mention_everyone="Whether to @everyone (default: False)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def announce(
+    interaction: discord.Interaction, message: str, mention_everyone: bool = False
+):
+    """Send a custom announcement message"""
+    embed = discord.Embed(
+        title="📢 ANNOUNCEMENT",
+        description=message,
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_footer(text=f"Announced by {interaction.user.display_name}")
+
+    content = "@everyone" if mention_everyone else None
+    await interaction.response.send_message(content=content, embed=embed)
+
+
 # ============================================================
 # ADMIN SETTINGS COMMANDS
 # ============================================================
@@ -1043,16 +1404,19 @@ async def admin_help_command(interaction: discord.Interaction):
 `/soldto TEAM` - Manually sell the current player to a team.
 `/unsold` - Mark the current player as unsold.
 `/skip` - Skip the current player (same as unsold).
+`/skipset` - ⭐ Skip entire current set and move to next.
 `/undobid` - Remove the last placed bid.
 `/rollback` - Undo the last completed sale.
 `/clear` - WIPE ALL DATA and reset.
 
 **Team & Player Management:**
 `/assignteam @user TEAM` - Assign a user to a team.
+`/assignteams @user1:TEAM1, @user2:TEAM2` - ⭐ Bulk assign users.
 `/unassignteam @user` - Remove a user from a team.
 `/setpurse TEAM amount` - Manually adjust a team's purse.
 `/addtosquad TEAM player price` - Add player to team (price in Cr).
 `/release TEAM player` - Remove a player from a team (refunds money).
+`/releasemultiple TEAM1:Player1, TEAM2:Player2` - ⭐ Bulk release players.
 `/trade player from_team to_team price` - Move player (price in Cr).
 
 **Re-Auction (Unsold Players):**
@@ -1062,15 +1426,22 @@ async def admin_help_command(interaction: discord.Interaction):
 `/reauctionlist set_name` - Bring back unsold players from a specific set.
 
 **List Management:**
-`/loadsets max_set` - Load players from CSV (Sets 1 to X).
+`/loadsets max_set` - Load players from Excel (Sets 1-67).
 `/addplayer list player price` - Add a player (price in Cr, default 0.2).
 `/addplayers list "Name1:Price1, Name2:Price2"` - Add multiple players.
+`/removeplayers list "Player1, Player2"` - ⭐ Remove multiple players.
 `/setorder list1 list2` - Set the order of player lists.
 `/deleteset set_name` - Delete a set and all its players.
+`/showlists` - View lists (paginated with ◀ ▶ buttons).
+
+**Communication:**
+`/announce message` - ⭐ Send custom announcement with embed.
 
 **Settings:**
 `/setcountdown seconds` - Change the bid timer duration.
 `/setstatschannel #channel` - Set the channel for the live leaderboard.
+
+*⭐ = New command*
 """
     await interaction.response.send_message(help_text, ephemeral=True)
 
@@ -1100,7 +1471,7 @@ async def start_next_player(channel: discord.TextChannel):
     if not success:
         current_list = bot.auction_manager.get_current_list_name()
         if current_list:
-            await channel.send(f"**List {current_list} completed!**")
+            await channel.send(f"**✅ Set {current_list.upper()} completed!**")
             await asyncio.sleep(LIST_GAP)
             await start_next_player(channel)
         else:
@@ -1114,7 +1485,7 @@ async def start_next_player(channel: discord.TextChannel):
             msg = "**⚠️ ALL LOADED SETS EXHAUSTED!**\n\n"
             msg += "The auction is now **PAUSED**.\n\n"
             msg += "**Admin Options:**\n"
-            msg += "• `/loadsets X` - Load more sets (up to set X)\n"
+            msg += "• `/loadsets X` - Load more sets (1-67)\n"
             msg += "• `/showunsold` - View unsold players\n"
             msg += "• `/reauctionall` - Bring all unsold players back\n"
             msg += "• `/resume` - Continue auction after adding sets\n"
@@ -1129,7 +1500,19 @@ async def start_next_player(channel: discord.TextChannel):
             await channel.send(bot.auction_manager.get_purse_display())
         return
 
+    # Get current set name for announcements
+    current_set_name = bot.auction_manager.get_current_list_name()
+
     if is_first_in_list:
+        # ANNOUNCE SET NAME BEFORE STARTING
+        set_embed = discord.Embed(
+            title=f"🎯 SET: {current_set_name.upper()}",
+            description=f"Starting players from **{current_set_name.upper()}**",
+            color=discord.Color.gold(),
+        )
+        await channel.send(embed=set_embed)
+        await asyncio.sleep(2)
+
         msg = bot.formatter.format_player_announcement(player_name, base_price)
         await channel.send(msg)
 
@@ -1143,7 +1526,7 @@ async def start_next_player(channel: discord.TextChannel):
         else:
             delay = INITIAL_SET_DELAY
             await channel.send(
-                f"🚨 **{player_name}** is the first player of a new list. Bidding will open in **{delay} seconds**."
+                f"🚨 **{player_name}** is the first player of **{current_set_name.upper()}**. Bidding will open in **{delay} seconds**."
             )
 
         await asyncio.sleep(delay)
