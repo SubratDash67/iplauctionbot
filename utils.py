@@ -142,29 +142,50 @@ class FileManager:
 
     @staticmethod
     def initialize_excel(filepath: str) -> None:
-        """Initialize Excel file with headers"""
+        """Initialize Excel file with headers - creates all required sheets"""
         wb = openpyxl.Workbook()
-        sheet = wb.active
-        sheet.title = "Auction Results"
-        headers = ["Player Name", "Team", "Final Price", "Timestamp"]
-        sheet.append(headers)
 
         header_fill = PatternFill(
             start_color="366092", end_color="366092", fill_type="solid"
         )
         header_font = Font(bold=True, color="FFFFFF")
+
+        # Sheet 1: Auction Results
+        sheet = wb.active
+        sheet.title = "Auction Results"
+        headers = ["Player Name", "Team", "Final Price", "Timestamp"]
+        sheet.append(headers)
         for cell in sheet[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center")
 
-        # Team Summary sheet
+        # Sheet 2: Team Summary
         team_sheet = wb.create_sheet("Team Summary")
         team_sheet.append(["Team", "Players Bought", "Total Spent", "Remaining Purse"])
         for cell in team_sheet[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center")
+
+        # Sheet 3: Unsold Players
+        unsold_sheet = wb.create_sheet("Unsold Players")
+        unsold_sheet.append(["Player", "Set Name", "Base Price"])
+        for cell in unsold_sheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        # Sheet 4+: Individual Team Sheets
+        from config import TEAMS
+
+        for team_code in sorted(TEAMS.keys()):
+            team_individual_sheet = wb.create_sheet(team_code)
+            team_individual_sheet.append(["Player Name", "Price", "Type"])
+            for cell in team_individual_sheet[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center")
 
         wb.save(filepath)
 
@@ -199,7 +220,7 @@ class FileManager:
             wb = openpyxl.load_workbook(filepath)
             if "Team Summary" in wb.sheetnames:
                 del wb["Team Summary"]
-            ts = wb.create_sheet("Team Summary")
+            ts = wb.create_sheet("Team Summary", 1)  # Position after Auction Results
             ts.append(["Team", "Players Bought", "Total Spent", "Remaining Purse"])
             header_fill = PatternFill(
                 start_color="366092", end_color="366092", fill_type="solid"
@@ -209,15 +230,17 @@ class FileManager:
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.alignment = Alignment(horizontal="center")
-            from config import DEFAULT_PURSE
+            from config import TEAMS
 
-            for team, purse_left in sorted(teams.items()):
-                spent = DEFAULT_PURSE - purse_left
+            for team in sorted(teams.keys()):
+                purse_left = teams.get(team, 0)
+                squad = team_squads.get(team, [])
+                spent = sum(price for _, price in squad)
                 # Format amounts as cr/L for readability
                 ts.append(
                     [
                         team,
-                        len(team_squads.get(team, [])),
+                        len(squad),
                         format_amount(spent),
                         format_amount(purse_left),
                     ]
@@ -227,47 +250,206 @@ class FileManager:
             raise Exception(f"Error updating team summary: {str(e)}")
 
     @staticmethod
+    def update_unsold_players_sheet(
+        filepath: str,
+        unsold_players: List[Tuple[str, str, Optional[int]]],
+    ) -> None:
+        """Update the unsold players sheet
+
+        Args:
+            filepath: Path to Excel file
+            unsold_players: List of (player_name, set_name, base_price)
+        """
+        try:
+            if not os.path.exists(filepath):
+                FileManager.initialize_excel(filepath)
+            wb = openpyxl.load_workbook(filepath)
+
+            # Remove existing sheet if present
+            if "Unsold Players" in wb.sheetnames:
+                del wb["Unsold Players"]
+
+            # Create at position 2 (after Team Summary)
+            us = wb.create_sheet("Unsold Players", 2)
+            us.append(["Player", "Set Name", "Base Price"])
+
+            header_fill = PatternFill(
+                start_color="366092", end_color="366092", fill_type="solid"
+            )
+            header_font = Font(bold=True, color="FFFFFF")
+            for cell in us[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center")
+
+            for player_name, set_name, base_price in unsold_players:
+                us.append(
+                    [
+                        player_name,
+                        set_name.upper() if set_name else "N/A",
+                        format_amount(base_price) if base_price else "N/A",
+                    ]
+                )
+
+            wb.save(filepath)
+        except Exception as e:
+            raise Exception(f"Error updating unsold players sheet: {str(e)}")
+
+    @staticmethod
+    def update_individual_team_sheets(
+        filepath: str,
+        teams: Dict[str, int],
+        team_squads: Dict[str, List[Tuple[str, int]]],
+        retained_players: Dict[str, List[Tuple[str, int]]] = None,
+    ) -> None:
+        """Update individual team sheets with squad details
+
+        Args:
+            filepath: Path to Excel file
+            teams: Team purses
+            team_squads: All squad data from database
+            retained_players: Retained players dict (optional, will import if not provided)
+        """
+        try:
+            if not os.path.exists(filepath):
+                FileManager.initialize_excel(filepath)
+
+            if retained_players is None:
+                from retained_players import RETAINED_PLAYERS
+
+                retained_players = RETAINED_PLAYERS
+
+            wb = openpyxl.load_workbook(filepath)
+
+            header_fill = PatternFill(
+                start_color="366092", end_color="366092", fill_type="solid"
+            )
+            header_font = Font(bold=True, color="FFFFFF")
+            summary_fill = PatternFill(
+                start_color="FFC000", end_color="FFC000", fill_type="solid"
+            )
+            summary_font = Font(bold=True)
+
+            from config import TEAMS
+
+            sheet_position = (
+                3  # Start after Auction Results, Team Summary, Unsold Players
+            )
+
+            for team_code in sorted(TEAMS.keys()):
+                # Remove existing sheet if present
+                if team_code in wb.sheetnames:
+                    del wb[team_code]
+
+                # Create new sheet
+                ts = wb.create_sheet(team_code, sheet_position)
+                sheet_position += 1
+
+                # Headers
+                ts.append(["Player Name", "Price", "Type"])
+                for cell in ts[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center")
+
+                squad = team_squads.get(team_code, [])
+                retained = retained_players.get(team_code, [])
+                retained_names = {p[0].lower() for p in retained}
+
+                total_spent = 0
+
+                # Add players
+                for player_name, price in squad:
+                    player_type = (
+                        "Retained"
+                        if player_name.lower() in retained_names
+                        else "Bought"
+                    )
+                    ts.append([player_name, format_amount(price), player_type])
+                    total_spent += price
+
+                # Add summary rows
+                ts.append([])  # Empty row
+                purse_left = teams.get(team_code, 0)
+
+                summary_row = ts.max_row + 1
+                ts.append(["Total Players", len(squad), ""])
+                ts.append(["Total Spent", format_amount(total_spent), ""])
+                ts.append(["Purse Remaining", format_amount(purse_left), ""])
+
+                # Style summary rows
+                for row_num in range(summary_row, ts.max_row + 1):
+                    for cell in ts[row_num]:
+                        cell.fill = summary_fill
+                        cell.font = summary_font
+
+                # Auto-fit column widths
+                ts.column_dimensions["A"].width = 30
+                ts.column_dimensions["B"].width = 15
+                ts.column_dimensions["C"].width = 12
+
+            wb.save(filepath)
+        except Exception as e:
+            raise Exception(f"Error updating individual team sheets: {str(e)}")
+
+    @staticmethod
     def regenerate_excel_from_db(
         filepath: str,
         sales: List[dict],
         teams: Dict[str, int],
         team_squads: Dict[str, List[Tuple[str, int]]],
+        unsold_players: List[Tuple[str, str, Optional[int]]] = None,
     ) -> None:
-        """Regenerate the entire Excel file from database sales records.
+        """Regenerate the entire Excel file from database records.
 
-        Use this after rollback to ensure Excel matches DB state.
+        Use this after any sale/rollback to ensure Excel matches DB state.
+
+        Args:
+            filepath: Path to Excel file
+            sales: List of sale records
+            teams: Team purses
+            team_squads: All squad data
+            unsold_players: List of (player_name, set_name, base_price) for unsold players
         """
         try:
-            # Initialize fresh Excel file
+            # Initialize fresh Excel file with all sheets
             FileManager.initialize_excel(filepath)
-
-            if not sales:
-                # No sales, just update team summary
-                FileManager.update_team_summary(filepath, teams, team_squads)
-                return
 
             wb = openpyxl.load_workbook(filepath)
             sheet = wb["Auction Results"]
 
-            # Add all sales from DB
-            for sale in sales:
-                formatted_price = format_amount(sale.get("final_price", 0))
-                timestamp = sale.get(
-                    "sold_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                )
-                sheet.append(
-                    [
-                        sale.get("player_name", "Unknown"),
-                        sale.get("team_code", "Unknown"),
-                        formatted_price,
-                        timestamp,
-                    ]
-                )
+            # Add all sales from DB (including UNSOLD)
+            if sales:
+                for sale in sales:
+                    team_code = sale.get("team_code", "Unknown")
+                    # Skip UNSOLD entries - they go in separate sheet
+                    if team_code == "UNSOLD":
+                        continue
+                    formatted_price = format_amount(sale.get("final_price", 0))
+                    timestamp = sale.get(
+                        "sold_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    )
+                    sheet.append(
+                        [
+                            sale.get("player_name", "Unknown"),
+                            team_code,
+                            formatted_price,
+                            timestamp,
+                        ]
+                    )
 
             wb.save(filepath)
 
-            # Update team summary
+            # Update Team Summary
             FileManager.update_team_summary(filepath, teams, team_squads)
+
+            # Update Unsold Players sheet
+            if unsold_players:
+                FileManager.update_unsold_players_sheet(filepath, unsold_players)
+
+            # Update Individual Team Sheets
+            FileManager.update_individual_team_sheets(filepath, teams, team_squads)
+
         except Exception as e:
             raise Exception(f"Error regenerating Excel: {str(e)}")
 
@@ -338,7 +520,7 @@ class MessageFormatter:
     @staticmethod
     def format_sold_message(player: str, team: str, amount: int) -> str:
         if team == "UNSOLD":
-             return (
+            return (
                 f"**UNSOLD**\n"
                 f"Player: **{player}**\n"
                 f"Base Price: **{format_amount(amount)}**"

@@ -784,7 +784,9 @@ class Database:
         """Delete a sale record (used when re-auctioning unsold players)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM sales WHERE LOWER(player_name) = LOWER(?)", (player_name,))
+            cursor.execute(
+                "DELETE FROM sales WHERE LOWER(player_name) = LOWER(?)", (player_name,)
+            )
             return cursor.rowcount > 0
 
     def rollback_last_sale(self) -> Optional[dict]:
@@ -1019,6 +1021,45 @@ class Database:
                 (row["id"], row["player_name"], row["list_name"], row["base_price"])
                 for row in cursor.fetchall()
             ]
+
+    def get_unsold_players_for_excel(self) -> List[Tuple[str, str, Optional[int]]]:
+        """Get unsold players formatted for Excel export.
+        Returns list of (player_name, set_name, base_price)"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT pl.player_name, pl.list_name, pl.base_price 
+                FROM player_lists pl
+                WHERE pl.auctioned = 1 
+                AND NOT EXISTS (
+                    SELECT 1 FROM team_squads ts 
+                    WHERE LOWER(ts.player_name) = LOWER(pl.player_name)
+                )
+                ORDER BY pl.list_name, pl.player_name
+                """
+            )
+            return [
+                (row["player_name"], row["list_name"], row["base_price"])
+                for row in cursor.fetchall()
+            ]
+
+    def get_team_bid_history(self, team_code: str, limit: int = 50) -> List[dict]:
+        """Get bid history for a specific team with player names.
+        Returns list of bid records."""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT player_name, amount, timestamp, is_auto_bid, user_name
+                FROM bid_history 
+                WHERE team_code = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (team_code, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     def reauction_multiple_players(self, player_ids: List[int]) -> int:
         """Reset auctioned status for multiple players. Returns count of players re-auctioned."""

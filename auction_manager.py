@@ -660,6 +660,13 @@ class AuctionManager:
         if team_upper not in teams:
             return BidResult(False, "Invalid team name")
 
+        # PREVENT DOUBLE BIDDING: Check if this team is already the highest bidder
+        if self.highest_bidder == team_upper:
+            return BidResult(
+                False,
+                "You are already the highest bidder! Double bidding is not allowed.",
+            )
+
         if self.highest_bidder is None:
             min_bid = self.base_price
         else:
@@ -762,6 +769,19 @@ class AuctionManager:
             player_name, from_team.upper(), to_team_upper, price
         )
         if success:
+            # Update Excel after trade
+            try:
+                teams = self.db.get_teams()
+                squads = self.db.get_all_squads()
+                sales = self.db.get_all_sales()
+                unsold = self.db.get_unsold_players_for_excel()
+                
+                self.file_manager.regenerate_excel_from_db(
+                    self.excel_file, sales, teams, squads, unsold
+                )
+            except Exception as e:
+                logger.error(f"Error updating Excel after trade: {e}")
+            
             return (
                 True,
                 f"Traded **{player_name}** from **{from_team.upper()}** to **{to_team_upper}** for {format_amount(price)}",
@@ -798,6 +818,20 @@ class AuctionManager:
             return False, "Insufficient purse."
 
         self.db.add_to_squad(team_upper, player, price)
+        
+        # Update Excel after manual add
+        try:
+            teams = self.db.get_teams()
+            squads = self.db.get_all_squads()
+            sales = self.db.get_all_sales()
+            unsold = self.db.get_unsold_players_for_excel()
+            
+            self.file_manager.regenerate_excel_from_db(
+                self.excel_file, sales, teams, squads, unsold
+            )
+        except Exception as e:
+            logger.error(f"Error updating Excel after manual add: {e}")
+        
         return (
             True,
             f"Added **{player}** to **{team_upper}** for {format_amount(price)}",
@@ -890,6 +924,7 @@ class AuctionManager:
     # ==================== RE-AUCTION UNSOLD PLAYERS ====================
 
     def reauction_player(self, player_name: str) -> Tuple[bool, str]:
+        """Re-auction a player - moves them to 'unsold players' list at the end"""
         player_data = self.db.find_player_by_name(player_name)
 
         if not player_data:
@@ -911,7 +946,7 @@ class AuctionManager:
                         False,
                         f"**{actual_name}** was already sold to **{team}**. Use /rollback to undo the sale first.",
                     )
-        
+
         # CLEANUP: Safely remove previous sales record (including UNSOLD status)
         try:
             self.db.delete_sale(actual_name)
@@ -921,11 +956,28 @@ class AuctionManager:
         if base_price is None:
             base_price = DEFAULT_BASE_PRICE
 
+        # Create "unsold players" list if it doesn't exist and add player there
+        unsold_list_name = "unsold players"
+        self.db.create_list(unsold_list_name)
+
+        # Remove from original list
+        self.db.remove_player_from_list(list_name, actual_name)
+
+        # Reset the auctioned status of original entry
         self.db.reset_player_auctioned_status(player_id)
+
+        # Add to unsold players list
+        self.db.add_player_to_list(unsold_list_name, actual_name, base_price)
+
+        # Ensure "unsold players" list is at the end of list order
+        current_order = self.db.get_list_order()
+        if unsold_list_name not in [o.lower() for o in current_order]:
+            current_order.append(unsold_list_name)
+            self.db.set_list_order(current_order)
 
         return (
             True,
-            f"**{actual_name}** has been added back to auction in **{list_name}** with base price {format_amount(base_price)}",
+            f"**{actual_name}** has been added to **Unsold Players** list with base price {format_amount(base_price)}",
         )
 
     # ==================== RELEASE PLAYERS ====================
@@ -976,18 +1028,36 @@ class AuctionManager:
             self.db.remove_from_squad(team_upper, player_name)
             self.db.delete_sale(player_name)
         except Exception as e:
-             logger.error(f"Error releasing player from DB: {e}")
+            logger.error(f"Error releasing player from DB: {e}")
 
-        # 3. Add to auction pool
-        self.db.create_list("released_players")
-        self.db.add_player_to_list("released_players", p_name, salary)
+        # 3. Add to "unsold players" list for re-auction
+        unsold_list_name = "unsold players"
+        self.db.create_list(unsold_list_name)
+        self.db.add_player_to_list(unsold_list_name, p_name, salary)
+
+        # Ensure "unsold players" list is at the end of list order
+        current_order = self.db.get_list_order()
+        if unsold_list_name not in [o.lower() for o in current_order]:
+            current_order.append(unsold_list_name)
+            self.db.set_list_order(current_order)
+
+        # 4. Update Excel
+        try:
+            teams = self.db.get_teams()
+            squads = self.db.get_all_squads()
+            sales = self.db.get_all_sales()
+            unsold = self.db.get_unsold_players_for_excel()
+
+            self.file_manager.regenerate_excel_from_db(
+                self.excel_file, sales, teams, squads, unsold
+            )
+        except Exception as e:
+            logger.error(f"Error updating Excel after release: {e}")
 
         return (
             True,
-            f'Released {p_name} from {team_upper}. Refunded {format_amount(salary)}. Player added to "released_players" list.',
-        )
-
-    # ==================== SALE FINALIZATION ====================
+            f'Released {p_name} from {team_upper}. Refunded {format_amount(salary)}. Player added to "Unsold Players" list.',
+        )  # ==================== SALE FINALIZATION ====================
 
     def finalize_sale(self) -> Tuple[bool, Optional[str], int]:
         self._load_state_from_db()
@@ -1014,7 +1084,7 @@ class AuctionManager:
         if highest_bid:
             team = highest_bid["team_code"]
             amount = highest_bid["amount"]
-            
+
             if not self.db.deduct_from_purse(team, amount):
                 return False, None, 0
 
@@ -1027,9 +1097,10 @@ class AuctionManager:
                 teams = self.db.get_teams()
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
+                unsold = self.db.get_unsold_players_for_excel()
 
                 self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads
+                    self.excel_file, sales, teams, squads, unsold
                 )
             except Exception as e:
                 logger.error(f"Error saving to Excel: {e}")
@@ -1043,40 +1114,23 @@ class AuctionManager:
         else:
             # No bids - player goes UNSOLD
             team = "UNSOLD"
-            amount = self.base_price or 0 
-            
+            amount = self.base_price or 0
+
             # Record directly to sales table
             try:
                 self.db.record_sale(player, team, amount, 0)
             except Exception as e:
                 logger.error(f"Failed to record UNSOLD in DB: {e}")
-            
-            # Trigger Excel update
+
+            # Trigger Excel update with unsold players
             try:
                 teams = self.db.get_teams()
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
-
-                # Forcefully verify if UNSOLD record is in the sales list
-                # If record_sale failed (due to FK), the sale won't be in 'sales'.
-                # We append it manually so Excel is correct regardless of DB strictness.
-                
-                unsold_found = False
-                for s in sales:
-                    if s.get("player_name") == player and s.get("team_code") == "UNSOLD":
-                        unsold_found = True
-                        break
-                
-                if not unsold_found:
-                    sales.append({
-                        "player_name": player,
-                        "team_code": "UNSOLD",
-                        "final_price": amount,
-                        "sold_at": time.strftime("%Y-%m-%d %H:%M:%S")
-                    })
+                unsold = self.db.get_unsold_players_for_excel()
 
                 self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads
+                    self.excel_file, sales, teams, squads, unsold
                 )
             except Exception as e:
                 logger.error(f"Error saving to Excel (Unsold): {e}")
@@ -1084,7 +1138,7 @@ class AuctionManager:
             # Clear state
             self._reset_player_state()
             self._save_state_to_db()
-            
+
             return True, "UNSOLD", amount
 
     # ==================== ADMIN OPERATIONS ====================
@@ -1114,9 +1168,10 @@ class AuctionManager:
                 teams = self.db.get_teams()
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
+                unsold = self.db.get_unsold_players_for_excel()
 
                 self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads
+                    self.excel_file, sales, teams, squads, unsold
                 )
             except Exception as e:
                 logger.error(f"Error updating Excel on rollback: {e}")
@@ -1140,7 +1195,14 @@ class AuctionManager:
         self._initialize_retained_players()
 
         try:
+            # Initialize fresh Excel with all sheets
             self.file_manager.initialize_excel(self.excel_file)
+            # Update with retained players
+            teams = self.db.get_teams()
+            squads = self.db.get_all_squads()
+            self.file_manager.update_individual_team_sheets(
+                self.excel_file, teams, squads
+            )
         except Exception as e:
             logger.error(f"Error reinitializing Excel: {e}")
 
@@ -1162,6 +1224,28 @@ class AuctionManager:
         for bid in bids[-limit:]:
             auto = "[AUTO]" if bid.get("is_auto_bid") else ""
             msg += f"{bid['team_code']:6} : {format_amount(bid['amount'])} {auto}\n"
+        msg += "```"
+        return msg
+
+    def get_team_bid_history_display(self, team: str, limit: int = 20) -> str:
+        """Get bid history for a specific team with player names"""
+        team_upper = team.upper()
+        bids = self.db.get_team_bid_history(team_upper, limit)
+
+        if not bids:
+            return f"No bid history found for **{team_upper}**."
+
+        msg = (
+            f"**{team_upper} Bid History (Last {min(limit, len(bids))} bids):**\n```\n"
+        )
+        msg += f"{'Player':<25} {'Amount':<12} {'Type':<8}\n"
+        msg += "=" * 50 + "\n"
+
+        for bid in bids:
+            auto = "AUTO" if bid.get("is_auto_bid") else "Manual"
+            player = bid.get("player_name", "Unknown")[:24]
+            msg += f"{player:<25} {format_amount(bid['amount']):<12} {auto:<8}\n"
+
         msg += "```"
         return msg
 
