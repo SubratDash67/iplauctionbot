@@ -337,6 +337,12 @@ class MessageFormatter:
 
     @staticmethod
     def format_sold_message(player: str, team: str, amount: int) -> str:
+        if team == "UNSOLD":
+             return (
+                f"**UNSOLD**\n"
+                f"Player: **{player}**\n"
+                f"Base Price: **{format_amount(amount)}**"
+            )
         return (
             f"**SOLD!**\n"
             f"Player: **{player}**\n"

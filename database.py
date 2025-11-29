@@ -259,6 +259,16 @@ class Database:
                 (team_code, player_name, price),
             )
 
+    def remove_from_squad(self, team_code: str, player_name: str) -> bool:
+        """Remove a player from a team's squad"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                (team_code, player_name),
+            )
+            return cursor.rowcount > 0
+
     def get_team_squad(self, team_code: str) -> List[Tuple[str, int]]:
         """Get all players in a team's squad"""
         with self._transaction() as conn:
@@ -769,6 +779,13 @@ class Database:
             cursor.execute("SELECT * FROM sales ORDER BY sold_at DESC LIMIT 1")
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    def delete_sale(self, player_name: str) -> bool:
+        """Delete a sale record (used when re-auctioning unsold players)"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM sales WHERE LOWER(player_name) = LOWER(?)", (player_name,))
+            return cursor.rowcount > 0
 
     def rollback_last_sale(self) -> Optional[dict]:
         """Rollback the last sale - returns the sale data"""

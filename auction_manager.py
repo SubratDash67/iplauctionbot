@@ -911,6 +911,12 @@ class AuctionManager:
                         False,
                         f"**{actual_name}** was already sold to **{team}**. Use /rollback to undo the sale first.",
                     )
+        
+        # CLEANUP: Safely remove previous sales record (including UNSOLD status)
+        try:
+            self.db.delete_sale(actual_name)
+        except Exception as e:
+            logger.error(f"Error deleting previous sale record for reauction: {e}")
 
         if base_price is None:
             base_price = DEFAULT_BASE_PRICE
@@ -965,23 +971,12 @@ class AuctionManager:
         # 1. Update Purse
         self.db.update_team_purse(team_upper, new_purse)
 
-        # 2. Remove from Squad (Deleting from `team_squads` via DB call if I had one,
-        # but I'll use a direct query via a new DB method or reuse logic)
-        # Actually, let's implement a specific DB method for removal to be safe.
-        # For now, we can use trade_player logic or manual deletion.
-        # Let's add a direct delete query here since we are in Manager.
-
-        with self.db._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "DELETE FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
-                (team_upper, player_name),
-            )
-            # Also delete from sales if present
-            cursor.execute(
-                "DELETE FROM sales WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
-                (team_upper, player_name),
-            )
+        # 2. Remove from Squad and Sales using DB methods
+        try:
+            self.db.remove_from_squad(team_upper, player_name)
+            self.db.delete_sale(player_name)
+        except Exception as e:
+             logger.error(f"Error releasing player from DB: {e}")
 
         # 3. Add to auction pool
         self.db.create_list("released_players")
@@ -1006,14 +1001,6 @@ class AuctionManager:
         # This prevents the "wrong team sold" bug caused by stale in-memory state
         highest_bid = self.db.get_highest_bid_for_player(player)
 
-        if highest_bid:
-            team = highest_bid["team_code"]
-            amount = highest_bid["amount"]
-        else:
-            # No bids - player goes unsold
-            team = None
-            amount = 0
-
         # Check if already sold (Double-Sold Safety)
         squads = self.db.get_all_squads()
         for squad in squads.values():
@@ -1024,7 +1011,10 @@ class AuctionManager:
                     self._save_state_to_db()  # Persist the cleared state
                     return False, None, 0
 
-        if team:
+        if highest_bid:
+            team = highest_bid["team_code"]
+            amount = highest_bid["amount"]
+            
             if not self.db.deduct_from_purse(team, amount):
                 return False, None, 0
 
@@ -1050,7 +1040,52 @@ class AuctionManager:
 
             return True, team, amount
 
-        return False, None, 0
+        else:
+            # No bids - player goes UNSOLD
+            team = "UNSOLD"
+            amount = self.base_price or 0 
+            
+            # Record directly to sales table
+            try:
+                self.db.record_sale(player, team, amount, 0)
+            except Exception as e:
+                logger.error(f"Failed to record UNSOLD in DB: {e}")
+            
+            # Trigger Excel update
+            try:
+                teams = self.db.get_teams()
+                squads = self.db.get_all_squads()
+                sales = self.db.get_all_sales()
+
+                # Forcefully verify if UNSOLD record is in the sales list
+                # If record_sale failed (due to FK), the sale won't be in 'sales'.
+                # We append it manually so Excel is correct regardless of DB strictness.
+                
+                unsold_found = False
+                for s in sales:
+                    if s.get("player_name") == player and s.get("team_code") == "UNSOLD":
+                        unsold_found = True
+                        break
+                
+                if not unsold_found:
+                    sales.append({
+                        "player_name": player,
+                        "team_code": "UNSOLD",
+                        "final_price": amount,
+                        "sold_at": time.strftime("%Y-%m-%d %H:%M:%S")
+                    })
+
+                self.file_manager.regenerate_excel_from_db(
+                    self.excel_file, sales, teams, squads
+                )
+            except Exception as e:
+                logger.error(f"Error saving to Excel (Unsold): {e}")
+
+            # Clear state
+            self._reset_player_state()
+            self._save_state_to_db()
+            
+            return True, "UNSOLD", amount
 
     # ==================== ADMIN OPERATIONS ====================
 
