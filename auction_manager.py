@@ -76,9 +76,13 @@ class AuctionManager:
         # In-memory state (synced with DB)
         self._load_state_from_db()
 
-        # Initialize Excel
+        # Initialize Excel with retained players
         try:
-            self.file_manager.initialize_excel(self.excel_file)
+            teams = self.db.get_teams()
+            squads = self.db.get_all_squads()
+            self.file_manager.initialize_excel_with_retained_players(
+                self.excel_file, teams, squads
+            )
         except Exception as e:
             logger.warning(f"Could not initialize Excel file: {e}")
 
@@ -775,13 +779,13 @@ class AuctionManager:
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
                 unsold = self.db.get_unsold_players_for_excel()
-                
+
                 self.file_manager.regenerate_excel_from_db(
                     self.excel_file, sales, teams, squads, unsold
                 )
             except Exception as e:
                 logger.error(f"Error updating Excel after trade: {e}")
-            
+
             return (
                 True,
                 f"Traded **{player_name}** from **{from_team.upper()}** to **{to_team_upper}** for {format_amount(price)}",
@@ -818,20 +822,20 @@ class AuctionManager:
             return False, "Insufficient purse."
 
         self.db.add_to_squad(team_upper, player, price)
-        
+
         # Update Excel after manual add
         try:
             teams = self.db.get_teams()
             squads = self.db.get_all_squads()
             sales = self.db.get_all_sales()
             unsold = self.db.get_unsold_players_for_excel()
-            
+
             self.file_manager.regenerate_excel_from_db(
                 self.excel_file, sales, teams, squads, unsold
             )
         except Exception as e:
             logger.error(f"Error updating Excel after manual add: {e}")
-        
+
         return (
             True,
             f"Added **{player}** to **{team_upper}** for {format_amount(price)}",

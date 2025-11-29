@@ -909,7 +909,7 @@ class Database:
 
             # Check if player exists in source team
             cursor.execute(
-                "SELECT id, price FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                "SELECT id, price, player_name FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
                 (from_team, player_name),
             )
             row = cursor.fetchone()
@@ -917,6 +917,7 @@ class Database:
                 return False
 
             original_price = row["price"]
+            actual_player_name = row["player_name"]  # Get actual name with correct case
 
             # Check if target team has enough purse BEFORE making changes
             cursor.execute(
@@ -948,7 +949,16 @@ class Database:
             # Add to target team
             cursor.execute(
                 "INSERT INTO team_squads (team_code, player_name, price) VALUES (?, ?, ?)",
-                (to_team, player_name, price),
+                (to_team, actual_player_name, price),
+            )
+
+            # Record the trade in sales table (so it appears in Auction Results)
+            cursor.execute(
+                """
+                INSERT INTO sales (player_name, team_code, final_price, sold_at, bid_count)
+                VALUES (?, ?, ?, datetime('now'), 0)
+            """,
+                (f"{actual_player_name} (TRADE from {from_team})", to_team, price),
             )
 
             return True

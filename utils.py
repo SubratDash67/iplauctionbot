@@ -190,6 +190,111 @@ class FileManager:
         wb.save(filepath)
 
     @staticmethod
+    def initialize_excel_with_retained_players(
+        filepath: str,
+        teams: Dict[str, int],
+        team_squads: Dict[str, List[Tuple[str, int]]],
+    ) -> None:
+        """Initialize Excel file with retained players already in team sheets.
+
+        This should be called at bot startup to populate team sheets with retained players.
+        """
+        try:
+            from retained_players import RETAINED_PLAYERS
+            from config import TEAMS as TEAM_CONFIG
+
+            # Initialize fresh Excel
+            FileManager.initialize_excel(filepath)
+
+            wb = openpyxl.load_workbook(filepath)
+
+            header_fill = PatternFill(
+                start_color="366092", end_color="366092", fill_type="solid"
+            )
+            header_font = Font(bold=True, color="FFFFFF")
+            summary_fill = PatternFill(
+                start_color="FFC000", end_color="FFC000", fill_type="solid"
+            )
+            summary_font = Font(bold=True)
+
+            # Update each team sheet with their retained players
+            for team_code in sorted(TEAM_CONFIG.keys()):
+                if team_code in wb.sheetnames:
+                    del wb[team_code]
+
+                ts = wb.create_sheet(team_code)
+                ts.append(["Player Name", "Price", "Type"])
+                for cell in ts[1]:
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = Alignment(horizontal="center")
+
+                # Get squad from database (includes retained players)
+                squad = team_squads.get(team_code, [])
+                retained = RETAINED_PLAYERS.get(team_code, [])
+                retained_names = {p[0].lower() for p in retained}
+
+                total_spent = 0
+
+                for player_name, price in squad:
+                    player_type = (
+                        "Retained"
+                        if player_name.lower() in retained_names
+                        else "Bought"
+                    )
+                    ts.append([player_name, format_amount(price), player_type])
+                    total_spent += price
+
+                # Summary rows
+                ts.append([])
+                purse_left = teams.get(team_code, 0)
+
+                summary_row = ts.max_row + 1
+                ts.append(["Total Players", len(squad), ""])
+                ts.append(["Total Spent", format_amount(total_spent), ""])
+                ts.append(["Purse Remaining", format_amount(purse_left), ""])
+
+                for row_num in range(summary_row, ts.max_row + 1):
+                    for cell in ts[row_num]:
+                        cell.fill = summary_fill
+                        cell.font = summary_font
+
+                ts.column_dimensions["A"].width = 30
+                ts.column_dimensions["B"].width = 15
+                ts.column_dimensions["C"].width = 12
+
+            # Also update Team Summary
+            if "Team Summary" in wb.sheetnames:
+                del wb["Team Summary"]
+            summary_sheet = wb.create_sheet("Team Summary", 1)
+            summary_sheet.append(
+                ["Team", "Players Bought", "Total Spent", "Remaining Purse"]
+            )
+            for cell in summary_sheet[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center")
+
+            from config import TEAMS as TEAM_PURSES
+
+            for team_code in sorted(TEAM_PURSES.keys()):
+                squad = team_squads.get(team_code, [])
+                total_spent = sum(price for _, price in squad)
+                remaining = teams.get(team_code, 0)
+                summary_sheet.append(
+                    [
+                        team_code,
+                        len(squad),
+                        format_amount(total_spent),
+                        format_amount(remaining),
+                    ]
+                )
+
+            wb.save(filepath)
+        except Exception as e:
+            raise Exception(f"Error initializing Excel with retained players: {str(e)}")
+
+    @staticmethod
     def save_player_to_excel(
         filepath: str, player: str, team: str, price: int, remaining_purse: int
     ) -> None:

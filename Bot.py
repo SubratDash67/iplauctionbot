@@ -1740,6 +1740,7 @@ async def countdown_loop(channel: discord.TextChannel):
     going_once_sent = False
     going_twice_sent = False
     going_thrice_sent = False
+    last_known_bid_time = bot.auction_manager.last_bid_time  # Track when bids come in
 
     while bot.auction_manager.active and not bot.auction_manager.paused:
         await asyncio.sleep(1)  # Check every second for precise timing
@@ -1749,12 +1750,22 @@ async def countdown_loop(channel: discord.TextChannel):
         bot.auction_manager._load_state_from_db()
         current_player_name = bot.auction_manager.current_player
 
+        # Check if a NEW bid came in (bid time changed)
+        current_bid_time = bot.auction_manager.last_bid_time
         if bot.auction_manager.highest_bidder is not None:
-            first_bid_placed = True
-            warning_sent = False  # Reset warning if bid placed
-            going_once_sent = False  # Reset going messages on new bid
-            going_twice_sent = False
-            going_thrice_sent = False
+            if not first_bid_placed:
+                # First bid just placed
+                first_bid_placed = True
+                last_known_bid_time = current_bid_time
+                going_once_sent = False
+                going_twice_sent = False
+                going_thrice_sent = False
+            elif current_bid_time > last_known_bid_time:
+                # A new bid came in - reset the going flags
+                last_known_bid_time = current_bid_time
+                going_once_sent = False
+                going_twice_sent = False
+                going_thrice_sent = False
 
         if not first_bid_placed:
             elapsed_since_start = now - player_start_time
@@ -1770,11 +1781,23 @@ async def countdown_loop(channel: discord.TextChannel):
                     f"📣 **BIDDING OPEN!** Waiting for first bid on **{current_player_name}**..."
                 )
 
-            # Send warning at 15 seconds remaining
-            if remaining <= 15 and remaining > 0 and not warning_sent:
-                warning_sent = True
+            # Progressive "going unsold" warnings for no-bid players
+            if remaining <= 30 and remaining > 20 and not going_once_sent:
+                going_once_sent = True
                 await channel.send(
-                    f"⚠️ **WARNING:** No bids yet! **{current_player_name}** will go UNSOLD in **{remaining}s**!"
+                    f"⏳ **{current_player_name}** going **UNSOLD** in **30 seconds**... Place your bids!"
+                )
+
+            if remaining <= 20 and remaining > 10 and not going_twice_sent:
+                going_twice_sent = True
+                await channel.send(
+                    f"⚠️ **{current_player_name}** going **UNSOLD** in **20 seconds**!"
+                )
+
+            if remaining <= 10 and remaining > 0 and not going_thrice_sent:
+                going_thrice_sent = True
+                await channel.send(
+                    f"🚨 **LAST CHANCE!** **{current_player_name}** going **UNSOLD** in **10 seconds**!"
                 )
 
             if remaining <= 0:
@@ -1783,6 +1806,12 @@ async def countdown_loop(channel: discord.TextChannel):
                         await last_msg.delete()
                     except:
                         pass
+
+                # Safety check - if no player, just move on
+                if not current_player_name:
+                    await asyncio.sleep(2)
+                    asyncio.create_task(start_next_player(channel))
+                    return
 
                 # Finalize the unsold sale
                 success, team, amount = bot.auction_manager.finalize_sale()
@@ -1802,32 +1831,30 @@ async def countdown_loop(channel: discord.TextChannel):
                 return
 
         else:
-            # First bid has been placed - use NO_BID_TIMEOUT (20 seconds)
+            # First bid has been placed - use NO_BID_TIMEOUT (90 seconds) for subsequent bids
             elapsed_since_last_bid = now - bot.auction_manager.last_bid_time
             remaining = NO_BID_TIMEOUT - int(elapsed_since_last_bid)
 
             current_bid = bot.auction_manager.current_bid
             current_team = bot.auction_manager.highest_bidder
 
-            # Going once at 14s remaining (6s after last bid)
-            if remaining <= 14 and remaining > 12 and not going_once_sent:
+            # Going once at 15s remaining
+            if remaining <= 15 and remaining > 10 and not going_once_sent:
                 going_once_sent = True
                 await channel.send(
                     f"🔔 **GOING ONCE!** {format_amount(current_bid)} to **{current_team}**!"
                 )
 
-            # Going twice at 12s remaining (8s after last bid)
-            if remaining <= 12 and remaining > 10 and not going_twice_sent:
+            # Going twice at 10s remaining
+            if remaining <= 10 and remaining > 5 and not going_twice_sent:
                 going_twice_sent = True
-                await asyncio.sleep(2)  # 2 second gap
                 await channel.send(
                     f"🔔🔔 **GOING TWICE!** {format_amount(current_bid)} to **{current_team}**!"
                 )
 
-            # Going thrice at 10s remaining (10s after last bid)
-            if remaining <= 10 and remaining > 8 and not going_thrice_sent:
+            # Going thrice at 5s remaining
+            if remaining <= 5 and remaining > 0 and not going_thrice_sent:
                 going_thrice_sent = True
-                await asyncio.sleep(2)  # 2 second gap
                 await channel.send(
                     f"🔔🔔🔔 **GOING THRICE!** Last chance! {format_amount(current_bid)} to **{current_team}**!"
                 )
@@ -1840,6 +1867,12 @@ async def countdown_loop(channel: discord.TextChannel):
                         pass
 
                 player_name = bot.auction_manager.current_player
+
+                # Safety check - if no player, just move on
+                if not player_name:
+                    await asyncio.sleep(2)
+                    asyncio.create_task(start_next_player(channel))
+                    return
 
                 # CRITICAL: Check if player was already sold before finalizing
                 squads = bot.auction_manager.db.get_all_squads()
@@ -1862,17 +1895,25 @@ async def countdown_loop(channel: discord.TextChannel):
 
                 success, team, amount = bot.auction_manager.finalize_sale()
 
-                if success:
+                if success and team and team != "UNSOLD":
+                    # Player SOLD to a team
                     sold_msg = bot.formatter.format_sold_message(
                         player_name, team, amount
                     )
                     await channel.send(sold_msg)
-                    if team != "UNSOLD":
-                        await channel.send(bot.auction_manager.get_purse_display())
-
+                    await channel.send(bot.auction_manager.get_purse_display())
                     asyncio.create_task(bot.update_stats_display())
+                elif success and team == "UNSOLD":
+                    # Player went unsold (no bids)
+                    sold_msg = bot.formatter.format_sold_message(
+                        player_name, team, amount
+                    )
+                    await channel.send(sold_msg)
                 else:
-                    await channel.send(f"Player **{player_name}** went **UNSOLD**.")
+                    # finalize_sale failed - should not happen normally
+                    await channel.send(
+                        f"⚠️ Error finalizing sale for **{player_name}**. Moving to next player."
+                    )
 
                 await asyncio.sleep(2)
                 asyncio.create_task(start_next_player(channel))
