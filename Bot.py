@@ -430,7 +430,6 @@ async def team_squad(interaction: discord.Interaction):
     msg += f"{'Players':30} : {current_players}\n"
     msg += f"{'Overseas Slots':30} : {overseas_slots}\n"
     msg += f"{'Total Slots Available':30} : {total_slots}\n"
-    msg += f"{'Slots Remaining':30} : {max(0, total_slots - current_players)}\n"
     msg += "```"
 
     await interaction.response.send_message(msg)
@@ -473,7 +472,6 @@ async def view_squad(interaction: discord.Interaction, team: str):
     msg += f"{'Players':30} : {current_players}\n"
     msg += f"{'Overseas Slots':30} : {overseas_slots}\n"
     msg += f"{'Total Slots Available':30} : {total_slots}\n"
-    msg += f"{'Slots Remaining':30} : {max(0, total_slots - current_players)}\n"
     msg += "```"
 
     await interaction.response.send_message(msg)

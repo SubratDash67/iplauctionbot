@@ -250,14 +250,23 @@ class Database:
 
     # ==================== TEAM SQUAD OPERATIONS ====================
 
-    def add_to_squad(self, team_code: str, player_name: str, price: int):
-        """Add a player to team's squad"""
+    def add_to_squad(self, team_code: str, player_name: str, price: int) -> bool:
+        """Add a player to team's squad. Returns False if player already exists."""
         with self._transaction() as conn:
             cursor = conn.cursor()
+            # Check if player already exists in this team's squad
+            cursor.execute(
+                "SELECT id FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                (team_code, player_name),
+            )
+            if cursor.fetchone():
+                return False  # Player already in squad
+
             cursor.execute(
                 "INSERT INTO team_squads (team_code, player_name, price) VALUES (?, ?, ?)",
                 (team_code, player_name, price),
             )
+            return True
 
     def remove_from_squad(self, team_code: str, player_name: str) -> bool:
         """Remove a player from a team's squad"""
@@ -952,11 +961,18 @@ class Database:
                 (to_team, actual_player_name, price),
             )
 
+            # Remove original sale record (if exists) to avoid duplicates
+            cursor.execute(
+                "DELETE FROM sales WHERE LOWER(player_name) = LOWER(?)",
+                (actual_player_name,),
+            )
+
             # Record the trade in sales table (so it appears in Auction Results)
+            # No bids for trades - just a direct transfer, so we omit total_bids (defaults to 0)
             cursor.execute(
                 """
-                INSERT INTO sales (player_name, team_code, final_price, sold_at, bid_count)
-                VALUES (?, ?, ?, datetime('now'), 0)
+                INSERT INTO sales (player_name, team_code, final_price)
+                VALUES (?, ?, ?)
             """,
                 (f"{actual_player_name} (TRADE from {from_team})", to_team, price),
             )
@@ -1034,9 +1050,16 @@ class Database:
 
     def get_unsold_players_for_excel(self) -> List[Tuple[str, str, Optional[int]]]:
         """Get unsold players formatted for Excel export.
-        Returns list of (player_name, set_name, base_price)"""
+        Returns list of (player_name, set_name, base_price)
+
+        Gets from two sources:
+        1. Players marked as auctioned in player_lists but not in any squad
+        2. Players in sales table with team_code='UNSOLD'
+        """
         with self._transaction() as conn:
             cursor = conn.cursor()
+
+            # Get from player_lists (auctioned but not sold)
             cursor.execute(
                 """
                 SELECT pl.player_name, pl.list_name, pl.base_price 
@@ -1049,10 +1072,39 @@ class Database:
                 ORDER BY pl.list_name, pl.player_name
                 """
             )
-            return [
+            from_player_lists = [
                 (row["player_name"], row["list_name"], row["base_price"])
                 for row in cursor.fetchall()
             ]
+
+            # Get from sales table (recorded as UNSOLD)
+            cursor.execute(
+                """
+                SELECT player_name, final_price
+                FROM sales 
+                WHERE team_code = 'UNSOLD'
+                ORDER BY sold_at
+                """
+            )
+            from_sales = [
+                (row["player_name"], "N/A", row["final_price"])
+                for row in cursor.fetchall()
+            ]
+
+            # Combine both lists, avoiding duplicates (by lowercase player name)
+            seen = set()
+            result = []
+            for player_name, set_name, base_price in from_player_lists:
+                if player_name.lower() not in seen:
+                    seen.add(player_name.lower())
+                    result.append((player_name, set_name, base_price))
+
+            for player_name, set_name, base_price in from_sales:
+                if player_name.lower() not in seen:
+                    seen.add(player_name.lower())
+                    result.append((player_name, set_name, base_price))
+
+            return result
 
     def get_team_bid_history(self, team_code: str, limit: int = 50) -> List[dict]:
         """Get bid history for a specific team with player names.

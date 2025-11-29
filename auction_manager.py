@@ -64,12 +64,9 @@ class AuctionManager:
         # Only initialize teams if database is empty (preserves data across bot restarts)
         teams_initialized = self.db.init_teams_if_empty(adjusted_teams)
 
-        # Add retained players to squads (only if teams were just initialized or squads are empty)
-        if teams_initialized:
-            self._initialize_retained_players()
-        else:
-            # Still check and add any missing retained players
-            self._initialize_retained_players()
+        # Add retained players to squads (checks for duplicates internally)
+        # This ensures any missing retained players are added on restart
+        self._initialize_retained_players()
 
         self._bid_lock = asyncio.Lock()
 
@@ -1034,7 +1031,15 @@ class AuctionManager:
         except Exception as e:
             logger.error(f"Error releasing player from DB: {e}")
 
-        # 3. Add to "unsold players" list for re-auction
+        # 3. Add released player to sales table as UNSOLD so it appears in Excel
+        try:
+            self.db.record_sale(
+                f"{p_name} (RELEASED from {team_upper})", "UNSOLD", salary, total_bids=0
+            )
+        except Exception as e:
+            logger.error(f"Error adding released player to sales: {e}")
+
+        # 4. Add to "unsold players" list for re-auction
         unsold_list_name = "unsold players"
         self.db.create_list(unsold_list_name)
         self.db.add_player_to_list(unsold_list_name, p_name, salary)
@@ -1045,7 +1050,7 @@ class AuctionManager:
             current_order.append(unsold_list_name)
             self.db.set_list_order(current_order)
 
-        # 4. Update Excel
+        # 5. Update Excel
         try:
             teams = self.db.get_teams()
             squads = self.db.get_all_squads()
