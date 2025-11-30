@@ -86,20 +86,31 @@ class AuctionManager:
         self._auto_load_csv_players()
 
     def _initialize_retained_players(self):
+        """Initialize retained players into squads.
+
+        Checks globally across ALL teams to prevent duplicates.
+        """
         existing_squads = self.db.get_all_squads()
 
-        for team_code, players in RETAINED_PLAYERS.items():
-            existing_players = set()
-            if team_code in existing_squads:
-                existing_players = {
-                    name.lower() for name, _ in existing_squads[team_code]
-                }
+        # Build a global set of all existing players (case-insensitive)
+        all_existing_players = set()
+        for team_code, squad in existing_squads.items():
+            for name, _ in squad:
+                all_existing_players.add(name.lower())
 
+        for team_code, players in RETAINED_PLAYERS.items():
             for player_name, salary in players:
-                if player_name.lower() not in existing_players:
-                    self.db.add_to_squad(
-                        team_code, player_name, salary, acquisition_type="retained"
-                    )
+                if player_name.lower() not in all_existing_players:
+                    try:
+                        success = self.db.add_to_squad(
+                            team_code, player_name, salary, acquisition_type="retained"
+                        )
+                        if success:
+                            all_existing_players.add(player_name.lower())
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not add retained player {player_name}: {e}"
+                        )
 
     def _auto_load_csv_players(self):
         pass

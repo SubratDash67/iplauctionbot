@@ -87,12 +87,53 @@ class Database:
                 pass  # Column already exists
 
             # Global unique constraint: player can only be in ONE team across all teams
+            # Clean up any existing duplicate player_name entries (case-insensitive)
+            # Keep the most recent row (highest id) for each player, delete older duplicates.
+            try:
+                cursor.execute(
+                    """
+                    DELETE FROM team_squads
+                    WHERE id NOT IN (
+                        SELECT MAX(id) FROM team_squads GROUP BY LOWER(player_name)
+                    )
+                    """
+                )
+                deleted = cursor.rowcount
+                if deleted and deleted > 0:
+                    # Log cleanup - use print as logger may not be configured at this point
+                    try:
+                        import logging
+
+                        logging.getLogger("AuctionBot.Database").warning(
+                            f"Removed {deleted} duplicate team_squads rows during DB init"
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                # If any error occurs during dedupe, continue and let index creation handle failures
+                pass
+
             try:
                 cursor.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_global_unique_player ON team_squads(player_name COLLATE NOCASE)"
                 )
-            except sqlite3.OperationalError:
-                pass  # Index already exists
+            except sqlite3.IntegrityError:
+                # In case duplicates still exist, attempt the DELETE again more forcefully
+                try:
+                    cursor.execute(
+                        """
+                        DELETE FROM team_squads
+                        WHERE id NOT IN (
+                            SELECT MAX(id) FROM team_squads GROUP BY LOWER(player_name)
+                        )
+                        """
+                    )
+                    cursor.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_global_unique_player ON team_squads(player_name COLLATE NOCASE)"
+                    )
+                except Exception:
+                    # If index creation still fails, raise to surface the problem
+                    raise
 
             # Player lists
             cursor.execute(
@@ -294,23 +335,27 @@ class Database:
             acquisition_type: 'retained', 'bought', or 'traded'
             source_team: For trades, the team traded from
         """
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            # Check if player already exists in ANY team's squad (prevent duplicates globally)
-            cursor.execute(
-                "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
-                (player_name,),
-            )
-            existing = cursor.fetchone()
-            if existing:
-                return False  # Player already in a squad
+        try:
+            with self._transaction() as conn:
+                cursor = conn.cursor()
+                # Check if player already exists in ANY team's squad (prevent duplicates globally)
+                cursor.execute(
+                    "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
+                    (player_name,),
+                )
+                existing = cursor.fetchone()
+                if existing:
+                    return False  # Player already in a squad
 
-            cursor.execute(
-                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
-                   VALUES (?, ?, ?, ?, ?)""",
-                (team_code, player_name, price, acquisition_type, source_team),
-            )
-            return True
+                cursor.execute(
+                    """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (team_code, player_name, price, acquisition_type, source_team),
+                )
+                return True
+        except sqlite3.IntegrityError:
+            # Unique constraint violation - player already exists
+            return False
 
     def remove_from_squad(self, team_code: str, player_name: str) -> bool:
         """Remove a player from a team's squad"""
