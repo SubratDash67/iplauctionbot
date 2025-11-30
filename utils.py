@@ -654,6 +654,7 @@ class FileManager:
             sheet_position = 4  # Start after Auction Results, Team Summary, Unsold Players, Trade History
 
             for team_code in sorted(TEAMS.keys()):
+
                 # Remove existing sheet if present
                 if team_code in wb.sheetnames:
                     del wb[team_code]
@@ -674,18 +675,53 @@ class FileManager:
                 retained_names = {p[0].lower() for p in retained}
                 traded_names = {p.lower() for p in traded_to_team.get(team_code, set())}
 
-                total_spent = 0
+                # Partition squad
+                retained_players = [
+                    (p, pr) for p, pr in squad if p.lower() in retained_names
+                ]
+                bought_players = [
+                    (p, pr)
+                    for p, pr in squad
+                    if p.lower() not in retained_names and p.lower() not in traded_names
+                ]
+                traded_players = [
+                    (p, pr) for p, pr in squad if p.lower() in traded_names
+                ]
 
-                # Add players
-                for player_name, price in squad:
-                    # Determine player type: Traded > Bought (retained players shown as Bought)
-                    if player_name.lower() in traded_names:
-                        player_type = "Traded"
-                    else:
-                        player_type = "Bought"
-                    safe_player = sanitize_csv_value(player_name)
-                    ts.append([safe_player, format_amount(price), player_type])
-                    total_spent += price
+                total_spent = sum(pr for _, pr in squad)
+
+                # Write sections
+                row = 2
+                if retained_players:
+                    ts.append(["--- Retained ---", "", ""])
+                    row += 1
+                    for player, price in retained_players:
+                        ts.append(
+                            [
+                                sanitize_csv_value(player),
+                                format_amount(price),
+                                "Retained",
+                            ]
+                        )
+                        row += 1
+
+                if bought_players:
+                    ts.append(["--- Bought ---", "", ""])
+                    row += 1
+                    for player, price in bought_players:
+                        ts.append(
+                            [sanitize_csv_value(player), format_amount(price), "Bought"]
+                        )
+                        row += 1
+
+                if traded_players:
+                    ts.append(["--- Traded ---", "", ""])
+                    row += 1
+                    for player, price in traded_players:
+                        ts.append(
+                            [sanitize_csv_value(player), format_amount(price), "Traded"]
+                        )
+                        row += 1
 
                 # Add summary rows
                 ts.append([])  # Empty row

@@ -181,7 +181,9 @@ class Database:
                     highest_bidder TEXT,
                     countdown_seconds INTEGER DEFAULT 15,
                     extensions_used INTEGER DEFAULT 0,
-                    last_bid_time REAL DEFAULT 0
+                    last_bid_time REAL DEFAULT 0,
+                    stats_channel_id TEXT,
+                    stats_message_id TEXT
                 )
             """
             )
@@ -190,6 +192,20 @@ class Database:
             try:
                 cursor.execute(
                     "ALTER TABLE auction_state ADD COLUMN last_bid_time REAL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            # Migration: Add stats_channel_id column if it doesn't exist
+            try:
+                cursor.execute(
+                    "ALTER TABLE auction_state ADD COLUMN stats_channel_id TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            # Migration: Add stats_message_id column if it doesn't exist
+            try:
+                cursor.execute(
+                    "ALTER TABLE auction_state ADD COLUMN stats_message_id TEXT"
                 )
             except sqlite3.OperationalError:
                 pass  # Column already exists
