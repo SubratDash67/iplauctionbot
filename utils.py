@@ -906,26 +906,32 @@ class MessageFormatter:
         total_spent = sum(price for _, price, _, _ in squad) if squad else 0
 
         # Separate players by type
+        retained_players = [(p, pr) for p, pr, acq, _ in squad if acq == "retained"]
         traded_players = [(p, pr, s) for p, pr, acq, s in squad if acq == "traded"]
-        bought_players = [
-            (p, pr) for p, pr, acq, _ in squad if acq == "bought" or acq == "retained"
-        ]
+        bought_players = [(p, pr) for p, pr, acq, _ in squad if acq == "bought"]
 
         msg = f"**{team_code} Squad:**\n```\n"
 
+        if retained_players:
+            msg += "--- Retained ---\n"
+            for player, price in retained_players:
+                msg += f"{player:25} : {format_amount(price)}\n"
+
         if bought_players:
+            if retained_players:
+                msg += "\n"
             msg += "--- Bought ---\n"
             for player, price in bought_players:
                 msg += f"{player:25} : {format_amount(price)}\n"
 
         if traded_players:
-            if bought_players:
+            if retained_players or bought_players:
                 msg += "\n"
             msg += "--- Traded ---\n"
             for player, price, source in traded_players:
                 msg += f"{player:25} : {format_amount(price)} [from {source}]\n"
 
-        if not bought_players and not traded_players:
+        if not retained_players and not bought_players and not traded_players:
             msg += "No players yet.\n"
 
         msg += f"\n{'='*50}\n"
