@@ -11,8 +11,18 @@ BOT_TOKEN = os.getenv("DISCORD_TOKEN", "")
 # =========================================
 DEFAULT_COUNTDOWN = 120  # Initial timer when bidding starts (2 minutes)
 NO_BID_TIMEOUT = 15  # After first bid, sell after this many seconds of no new bids
+
+# GAP SETTINGS
+# -----------------
+# Delay between the last bid and when the countdown logic (Going Once/Twice) actually starts.
+# 0 = No gap (Timer starts immediately after bid)
+# 5 = Wait 5 seconds after bid, THEN start the 15s countdown
+COUNTDOWN_GAP = 0
+
+# Time to wait between the sale of one player and the start of the next
+PLAYER_GAP = 5
+
 NO_START_TIMEOUT = 60  # If NO bids at all, player goes unsold after this time
-PLAYER_GAP = 5  # Seconds between players (adjustable via /setplayergap)
 LIST_GAP = 5  # Seconds between sets/lists
 RESUME_DELAY = 5  # Delay after auction started/resumed message
 

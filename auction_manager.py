@@ -5,7 +5,6 @@ Handles all auction-related logic with atomic operations, auto-bid, and anti-sni
 
 import asyncio
 import time
-import re
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -16,12 +15,9 @@ logger = logging.getLogger("AuctionBot.Manager")
 from config import (
     DEFAULT_BASE_PRICE,
     DEFAULT_COUNTDOWN,
-    NO_BID_TIMEOUT,
-    NO_START_TIMEOUT,
+    COUNTDOWN_GAP,
     PLAYER_GAP,
-    LIST_GAP,
     DEFAULT_AUCTION_FILE,
-    TEAMS,
     get_bid_increment,
 )
 from database import Database
@@ -55,6 +51,10 @@ class AuctionManager:
         self.file_manager = FileManager()
         self.formatter = MessageFormatter()
 
+        # Configuration settings
+        self.countdown_gap = COUNTDOWN_GAP
+        self.player_gap = PLAYER_GAP
+
         # Initialize teams with retained players deducted - ONLY if no existing teams
         adjusted_teams = {}
         for team_code, initial_purse in teams.items():
@@ -62,32 +62,41 @@ class AuctionManager:
             adjusted_teams[team_code] = remaining
 
         # Only initialize teams if database is empty (preserves data across bot restarts)
-        teams_initialized = self.db.init_teams_if_empty(adjusted_teams)
-
-        # Add retained players to squads (checks for duplicates internally)
-        # This ensures any missing retained players are added on restart
-        self._initialize_retained_players()
+        self.db.init_teams_if_empty(adjusted_teams)
 
         self._bid_lock = asyncio.Lock()
 
         # In-memory state (synced with DB)
         self._load_state_from_db()
 
-        # Initialize Excel with retained players
+        # NOTE: Automatic loading of retained players and Excel generation has been removed
+        # per request. Use the /loadretained command to initialize this data.
+
+    def load_retained_data(self) -> Tuple[bool, str]:
+        """
+        Loads retained players into the database and initializes the Excel file.
+        This serves as the /loadretained command handler.
+        """
         try:
+            # 1. Populate DB with retained players
+            self._initialize_retained_players()
+
+            # 2. Get fresh data from DB
             teams = self.db.get_teams()
             squads = self.db.get_all_squads()
+
+            # 3. Initialize Excel
             self.file_manager.initialize_excel_with_retained_players(
                 self.excel_file, teams, squads
             )
-        except Exception as e:
-            logger.warning(f"Could not initialize Excel file: {e}")
 
-        self._auto_load_csv_players()
+            return True, "Successfully loaded retained players and initialized Excel."
+        except Exception as e:
+            logger.error(f"Error loading retained data: {e}")
+            return False, f"Error loading retained data: {str(e)}"
 
     def _initialize_retained_players(self):
         """Initialize retained players into squads.
-
         Checks globally across ALL teams to prevent duplicates.
         """
         existing_squads = self.db.get_all_squads()
@@ -98,6 +107,7 @@ class AuctionManager:
             for name, _ in squad:
                 all_existing_players.add(name.lower())
 
+        count = 0
         for team_code, players in RETAINED_PLAYERS.items():
             for player_name, salary in players:
                 if player_name.lower() not in all_existing_players:
@@ -107,27 +117,17 @@ class AuctionManager:
                         )
                         if success:
                             all_existing_players.add(player_name.lower())
+                            count += 1
                     except Exception as e:
                         logger.warning(
                             f"Could not add retained player {player_name}: {e}"
                         )
-
-    def _auto_load_csv_players(self):
-        pass
+        return count
 
     def _load_auction_excel(
         self, filepath: str, max_set: Optional[int] = None
     ) -> Tuple[bool, str]:
-        """
-        Load players from Excel file (Auction_list.xlsx).
-
-        Expected columns:
-        - Column A: Player NO. (integer)
-        - Column B: SET NO (1-67)
-        - Column C: SET (e.g., "BA1") - used as set name
-        - Column D: PLAYER (player name)
-        - Column E: BASE (in Lakhs, e.g., 100 = 1 Cr)
-        """
+        """Load players from Excel file (Auction_list.xlsx)."""
         from openpyxl import load_workbook
 
         try:
@@ -184,10 +184,6 @@ class AuctionManager:
                     "player": 3,  # Column D
                     "base": 4,  # Column E
                 }
-
-            logger.info(
-                f"Excel header found at row {header_row}, columns: {col_indices}"
-            )
 
             # Process data rows
             for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
@@ -285,14 +281,6 @@ class AuctionManager:
 
             wb.close()
 
-            logger.info(
-                f"Excel Parsing Summary: {row_count} rows read, {skipped_count} skipped, {len(players_by_set)} new sets"
-            )
-            if max_set:
-                logger.info(f"Max set filter: 1 to {max_set}")
-            if existing_set_names:
-                logger.info(f"Existing sets skipped: {len(existing_set_names)}")
-
             if not players_by_set:
                 return (
                     True,
@@ -303,7 +291,6 @@ class AuctionManager:
             for set_name, players in players_by_set.items():
                 self.db.add_players_to_list(set_name, players)
                 total_players += len(players)
-                logger.debug(f"  {set_name}: {len(players)} players")
 
             # Update list order to include new sets (merge with existing)
             if players_by_set:
@@ -322,23 +309,14 @@ class AuctionManager:
                 self.db.set_list_order(final_order)
 
             max_set_msg = f" (sets 1-{max_set})" if max_set else ""
-            existing_msg = (
-                f" ({len(existing_set_names)} existing sets kept)"
-                if existing_set_names
-                else ""
-            )
             return (
                 True,
-                f"Loaded {total_players} players from {len(players_by_set)} NEW sets{max_set_msg}{existing_msg}",
+                f"Loaded {total_players} players from {len(players_by_set)} NEW sets{max_set_msg}",
             )
 
         except FileNotFoundError:
             return False, f"Excel file not found: {filepath}"
         except Exception as e:
-            import traceback
-
-            error_details = traceback.format_exc()
-            logger.error(f"Error loading Excel: {error_details}")
             return False, f"Error loading Excel: {str(e)}"
 
     def _load_state_from_db(self):
@@ -453,11 +431,7 @@ class AuctionManager:
     def remove_players_from_list(
         self, list_name: str, player_names: List[str]
     ) -> Tuple[List[str], List[str]]:
-        """Remove multiple players from a list.
-
-        Returns:
-            Tuple of (removed_players, not_found_players)
-        """
+        """Remove multiple players from a list."""
         list_name_lower = list_name.lower()
         removed = []
         not_found = []
@@ -472,11 +446,7 @@ class AuctionManager:
         return removed, not_found
 
     def skip_current_set(self) -> int:
-        """Skip all remaining players in current set and move to next set.
-
-        Returns:
-            Number of players skipped (marked as auctioned/unsold)
-        """
+        """Skip all remaining players in current set and move to next set."""
         current_list = self.get_current_list_name()
         if not current_list:
             return 0
@@ -501,7 +471,7 @@ class AuctionManager:
 
         player_lists = self.db.get_player_lists()
         if not player_lists:
-            return False, "No player lists available"
+            return False, "No player lists available. Use /loadsets first."
 
         list_order = self.db.get_list_order()
         if not list_order:
@@ -562,10 +532,8 @@ class AuctionManager:
         self._save_state_to_db()
 
     def get_next_player(self) -> Tuple[bool, str, Optional[int], bool]:
-        """
-        Get the next player. Safely handles state to avoid re-auctioning active player.
-        """
-        # CRITICAL FIX: If current_player is set, check if they're already processed
+        """Get the next player. Safely handles state to avoid re-auctioning active player."""
+        # Check if current player is already active and valid
         if self.current_player:
             # Check if this player is already in a squad (sold)
             squads = self.db.get_all_squads()
@@ -593,7 +561,6 @@ class AuctionManager:
                 return (True, self.current_player, self.base_price, False)
 
         list_order = self.db.get_list_order()
-
         auctioned_count = self.db.get_auctioned_count()
         is_start_of_auction = auctioned_count == 0
 
@@ -760,14 +727,7 @@ class AuctionManager:
     def trade_player(
         self, player_name: str, from_team: str, to_team: str, price_cr: float
     ) -> Tuple[bool, str]:
-        """Trade player between teams
-
-        Args:
-            player_name: Player to trade
-            from_team: Source team
-            to_team: Destination team
-            price_cr: Price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)
-        """
+        """Trade player between teams"""
         # Convert Crores to Rupees (1 Cr = 10,000,000)
         price = int(price_cr * 10_000_000)
 
@@ -808,14 +768,7 @@ class AuctionManager:
     def manual_add_player(
         self, team: str, player: str, price_cr: float
     ) -> Tuple[bool, str]:
-        """Manually add a player to a squad
-
-        Args:
-            team: Team code
-            player: Player name
-            price_cr: Price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)
-        """
-        # Validate price is positive
+        """Manually add a player to a squad"""
         if price_cr <= 0:
             return False, "Price must be a positive value."
 
@@ -924,7 +877,7 @@ class AuctionManager:
             timestamp = time.time()
             self.current_bid = next_bid
             self.highest_bidder = winning_team
-            self.last_bid_time = time.time()
+            self.last_bid_time = timestamp
 
             self.db.record_bid(
                 player_name=self.current_player,
@@ -1008,13 +961,7 @@ class AuctionManager:
     def release_retained_player(
         self, team: str, player_name: str, before_auction: bool = False
     ) -> Tuple[bool, str]:
-        """Release any player from a squad back into auction (Retained or Sold)
-
-        Args:
-            team: Team code
-            player_name: Player to release
-            before_auction: If True, allows release even if auction hasn't started
-        """
+        """Release any player from a squad back into auction (Retained or Sold)"""
         team_upper = team.upper()
         teams = self.db.get_teams()
 
@@ -1038,8 +985,6 @@ class AuctionManager:
         p_name, salary = player_found
 
         # Refund logic
-        # For retained players, salary is their retention price.
-        # For auctioned players, salary is their sold price.
         current_purse = teams[team_upper]
         new_purse = current_purse + salary
 
@@ -1098,11 +1043,7 @@ class AuctionManager:
     # ==================== SALE FINALIZATION ====================
 
     async def finalize_sale(self) -> Tuple[bool, Optional[str], int]:
-        """Finalize the current player sale using atomic database operations.
-
-        Uses _bid_lock to prevent race conditions with concurrent bids.
-        Uses atomic database operations to ensure data integrity.
-        """
+        """Finalize the current player sale using atomic database operations."""
         async with self._bid_lock:
             self._load_state_from_db()
 
@@ -1112,7 +1053,6 @@ class AuctionManager:
             player = self.current_player
 
             # CRITICAL FIX: Get the winning bid from bid_history table - authoritative source
-            # This prevents the "wrong team sold" bug caused by stale in-memory state
             highest_bid = self.db.get_highest_bid_for_player(player)
 
             if highest_bid:
@@ -1133,7 +1073,6 @@ class AuctionManager:
                     return False, None, 0
 
                 # Update Excel (non-critical, outside transaction)
-                # Use asyncio.to_thread to prevent blocking the event loop
                 try:
                     teams = self.db.get_teams()
                     squads = self.db.get_all_squads()
@@ -1173,7 +1112,6 @@ class AuctionManager:
                     logger.error(f"Failed to record UNSOLD in DB: {e}")
 
                 # Update Excel (non-critical)
-                # Use asyncio.to_thread to prevent blocking the event loop
                 try:
                     teams = self.db.get_teams()
                     squads = self.db.get_all_squads()
@@ -1229,11 +1167,7 @@ class AuctionManager:
         self.player_gap = seconds
 
     def _create_backup(self) -> str:
-        """Create a JSON backup of all auction data.
-
-        Returns:
-            Path to the backup file
-        """
+        """Create a JSON backup of all auction data."""
         import json
         from datetime import datetime
 
@@ -1286,10 +1220,9 @@ class AuctionManager:
         return sale
 
     def clear_all_data(self) -> Optional[str]:
-        """Clear all auction data and reset. Creates backup first.
-
-        Returns:
-            Path to backup file if created successfully, None otherwise
+        """
+        Clear auction progress (buys, bids, releases) but KEEP retained players.
+        Resets teams to (Original Purse - Retained Cost).
         """
         # Create backup before destructive operation
         backup_path = None
@@ -1299,16 +1232,41 @@ class AuctionManager:
         except Exception as e:
             logger.warning(f"Failed to create backup before clear: {e}")
 
+        # 1. Clear State
         self._reset_state()
-        self.db.clear_trade_history()
-        self.db.clear_released_players()
-        self.db.clear_auction_buys()
-        # Do NOT touch retained players or teams
+
+        # 2. Clear Database Tables (granularly)
+        self.db.clear_auction_buys()  # Deletes bought/traded players, keeps retained
+        self.db.clear_released_players()  # Deletes released players list
+        self.db.clear_unsold_players()  # Deletes unsold players list
+        self.db.clear_sales()  # Deletes sales history
+        self.db.clear_bid_history()  # Deletes bid history
+        self.db.clear_trade_history()  # Deletes trade history
+        self.db.clear_all_auto_bids()  # Deletes auto bids
+
+        # 3. Allow players to be bid on again
+        self.db.reset_all_player_auction_status()
+
+        # 4. Reset Team Purses
+        # Logic: Reset to original, then subtract cost of remaining squad (which is just retained now)
+        self.db.reset_teams()
+        squads = self.db.get_all_squads()  # Should only contain retained now
+
+        for team, players in squads.items():
+            retained_cost = sum(price for _, price in players)
+            if retained_cost > 0:
+                self.db.deduct_from_purse(team, retained_cost)
+
+        # 5. Regenerate Excel with clean state
         try:
-            # Initialize fresh Excel with all sheets
-            self.file_manager.initialize_excel(self.excel_file)
+            teams = self.db.get_teams()
+            squads = self.db.get_all_squads()
+            # Everything else is empty
+            self.file_manager.initialize_excel_with_retained_players(
+                self.excel_file, teams, squads
+            )
         except Exception as e:
-            logger.error(f"Error reinitializing Excel: {e}")
+            logger.error(f"Error reinitializing Excel after clear: {e}")
 
         return backup_path
 
@@ -1361,14 +1319,18 @@ class AuctionManager:
         msg = "**📊 LIVE AUCTION STATS**\n\n"
 
         if data["most_expensive"]:
-            msg += f"💰 **Most Expensive:** {data['most_expensive']['player_name']} - {format_amount(data['most_expensive']['final_price'])} ({data['most_expensive']['team_code']})\n"
+            # Format: Player Name - Price (Team Name)
+            p_name = data["most_expensive"]["player_name"]
+            price = format_amount(data["most_expensive"]["final_price"])
+            t_code = data["most_expensive"]["team_code"]
+            msg += f"💰 **Most Expensive:** {p_name} - {price} ({t_code})\n"
         else:
             msg += "💰 **Most Expensive:** None\n"
 
         if data["most_players"]:
             msg += f"📈 **Most Players:** {data['most_players']['team_code']} ({data['most_players']['cnt']})\n"
         else:
-            msg += "📈 **Most Players:** None\n"
+            msg += "📉 **Most Players:** None\n"  # Fixed label
 
         if data["least_players"]:
             msg += f"📉 **Least Players:** {data['least_players']['team_code']} ({data['least_players']['cnt']})\n"

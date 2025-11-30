@@ -87,8 +87,6 @@ class Database:
                 pass  # Column already exists
 
             # Global unique constraint: player can only be in ONE team across all teams
-            # Clean up any existing duplicate player_name entries (case-insensitive)
-            # Keep the most recent row (highest id) for each player, delete older duplicates.
             try:
                 cursor.execute(
                     """
@@ -99,18 +97,7 @@ class Database:
                     """
                 )
                 deleted = cursor.rowcount
-                if deleted and deleted > 0:
-                    # Log cleanup - use print as logger may not be configured at this point
-                    try:
-                        import logging
-
-                        logging.getLogger("AuctionBot.Database").warning(
-                            f"Removed {deleted} duplicate team_squads rows during DB init"
-                        )
-                    except Exception:
-                        pass
             except Exception:
-                # If any error occurs during dedupe, continue and let index creation handle failures
                 pass
 
             try:
@@ -118,7 +105,7 @@ class Database:
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_global_unique_player ON team_squads(player_name COLLATE NOCASE)"
                 )
             except sqlite3.IntegrityError:
-                # In case duplicates still exist, attempt the DELETE again more forcefully
+                # Force cleanup if index creation fails
                 try:
                     cursor.execute(
                         """
@@ -132,8 +119,7 @@ class Database:
                         "CREATE UNIQUE INDEX IF NOT EXISTS idx_global_unique_player ON team_squads(player_name COLLATE NOCASE)"
                     )
                 except Exception:
-                    # If index creation still fails, raise to surface the problem
-                    raise
+                    pass
 
             # Player lists
             cursor.execute(
@@ -159,13 +145,12 @@ class Database:
             """
             )
 
-            # Migration: Add enabled column if it doesn't exist
             try:
                 cursor.execute(
                     "ALTER TABLE list_order ADD COLUMN enabled INTEGER DEFAULT 0"
                 )
             except sqlite3.OperationalError:
-                pass  # Column already exists
+                pass
 
             # Auction state (single row)
             cursor.execute(
@@ -188,29 +173,25 @@ class Database:
             """
             )
 
-            # Migration: Add last_bid_time column if it doesn't exist
             try:
                 cursor.execute(
                     "ALTER TABLE auction_state ADD COLUMN last_bid_time REAL DEFAULT 0"
                 )
             except sqlite3.OperationalError:
-                pass  # Column already exists
-            # Migration: Add stats_channel_id column if it doesn't exist
+                pass
             try:
                 cursor.execute(
                     "ALTER TABLE auction_state ADD COLUMN stats_channel_id TEXT"
                 )
             except sqlite3.OperationalError:
-                pass  # Column already exists
-            # Migration: Add stats_message_id column if it doesn't exist
+                pass
             try:
                 cursor.execute(
                     "ALTER TABLE auction_state ADD COLUMN stats_message_id TEXT"
                 )
             except sqlite3.OperationalError:
-                pass  # Column already exists
+                pass
 
-            # Initialize auction state if not exists
             cursor.execute(
                 """
                 INSERT OR IGNORE INTO auction_state (id) VALUES (1)
@@ -302,12 +283,12 @@ class Database:
                 )
 
     def init_teams_if_empty(self, teams: Dict[str, int]) -> bool:
-        """Initialize teams ONLY if teams table is empty. Returns True if initialized."""
+        """Initialize teams ONLY if teams table is empty."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as cnt FROM teams")
             if cursor.fetchone()["cnt"] > 0:
-                return False  # Teams already exist, do nothing
+                return False
 
             for team_code, purse in teams.items():
                 cursor.execute(
@@ -366,26 +347,17 @@ class Database:
         acquisition_type: str = "bought",
         source_team: str = None,
     ) -> bool:
-        """Add a player to team's squad. Returns False if player already exists.
-
-        Args:
-            team_code: Team to add player to
-            player_name: Player name
-            price: Price paid
-            acquisition_type: 'retained', 'bought', or 'traded'
-            source_team: For trades, the team traded from
-        """
+        """Add a player to team's squad."""
         try:
             with self._transaction() as conn:
                 cursor = conn.cursor()
-                # Check if player already exists in ANY team's squad (prevent duplicates globally)
                 cursor.execute(
                     "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
                     (player_name,),
                 )
                 existing = cursor.fetchone()
                 if existing:
-                    return False  # Player already in a squad
+                    return False
 
                 cursor.execute(
                     """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
@@ -394,7 +366,6 @@ class Database:
                 )
                 return True
         except sqlite3.IntegrityError:
-            # Unique constraint violation - player already exists
             return False
 
     def remove_from_squad(self, team_code: str, player_name: str) -> bool:
@@ -408,8 +379,7 @@ class Database:
             return cursor.rowcount > 0
 
     def get_team_squad(self, team_code: str) -> List[Tuple[str, int, str, str]]:
-        """Get all players in a team's squad with acquisition info.
-        Returns: List of (player_name, price, acquisition_type, source_team)"""
+        """Get all players in a team's squad with acquisition info."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -429,16 +399,6 @@ class Database:
                 for row in cursor.fetchall()
             ]
 
-    def get_team_squad_simple(self, team_code: str) -> List[Tuple[str, int]]:
-        """Get all players in a team's squad (simple format for backwards compatibility)."""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT player_name, price FROM team_squads WHERE team_code = ? ORDER BY bought_at",
-                (team_code,),
-            )
-            return [(row["player_name"], row["price"]) for row in cursor.fetchall()]
-
     def get_all_squads(self) -> Dict[str, List[Tuple[str, int]]]:
         """Get all team squads (simple format)"""
         with self._transaction() as conn:
@@ -448,7 +408,13 @@ class Database:
 
             squads = {}
             for team in teams:
-                squads[team] = self.get_team_squad_simple(team)
+                cursor.execute(
+                    "SELECT player_name, price FROM team_squads WHERE team_code = ? ORDER BY bought_at",
+                    (team,),
+                )
+                squads[team] = [
+                    (row["player_name"], row["price"]) for row in cursor.fetchall()
+                ]
             return squads
 
     def get_all_squads_detailed(self) -> Dict[str, List[Tuple[str, int, str, str]]]:
@@ -464,15 +430,24 @@ class Database:
             return squads
 
     def clear_squads(self):
-        """Clear all squad data"""
+        """Clear all squad data (Wipes everything)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM team_squads")
 
+    def clear_auction_buys(self):
+        """Clear ONLY bought/traded players, keep retained players.
+        Also clears Sales history since that tracks buys."""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            # Delete players who were NOT retained
+            cursor.execute(
+                "DELETE FROM team_squads WHERE acquisition_type != 'retained'"
+            )
+
     # ==================== PLAYER LIST OPERATIONS ====================
 
     def create_list(self, list_name: str) -> bool:
-        """Create a new player list"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -482,13 +457,12 @@ class Database:
             if cursor.fetchone()["cnt"] > 0:
                 return False
 
-            # Add to list order
             cursor.execute(
                 "SELECT COALESCE(MAX(position), 0) + 1 as next_pos FROM list_order"
             )
             next_pos = cursor.fetchone()["next_pos"]
             cursor.execute(
-                "INSERT OR IGNORE INTO list_order (position, list_name) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO list_order (position, list_name, enabled) VALUES (?, ?, 0)",
                 (next_pos, list_name.lower()),
             )
             return True
@@ -496,7 +470,6 @@ class Database:
     def add_player_to_list(
         self, list_name: str, player_name: str, base_price: Optional[int] = None
     ) -> bool:
-        """Add a player to a list"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -506,8 +479,6 @@ class Database:
             return True
 
     def remove_player_from_list(self, list_name: str, player_name: str) -> bool:
-        """Remove a player from a list by name (case-insensitive).
-        Returns True if player was found and removed."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -517,8 +488,6 @@ class Database:
             return cursor.rowcount > 0
 
     def mark_set_as_auctioned(self, set_name: str) -> int:
-        """Mark all unauctioned players in a set as auctioned (skipped/unsold).
-        Returns the number of players marked."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -530,7 +499,6 @@ class Database:
     def add_players_to_list(
         self, list_name: str, players: List[Tuple[str, Optional[int]]]
     ):
-        """Add multiple players to a list"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             for player_name, base_price in players:
@@ -540,7 +508,6 @@ class Database:
                 )
 
     def get_player_lists(self) -> Dict[str, List[Tuple[str, Optional[int]]]]:
-        """Get all player lists with unauctioned players"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -555,7 +522,6 @@ class Database:
             return lists
 
     def get_all_lists(self) -> Dict[str, List[dict]]:
-        """Get ALL player lists (both auctioned and unauctioned) for backup purposes"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -576,14 +542,12 @@ class Database:
             return lists
 
     def get_list_order(self) -> List[str]:
-        """Get the order of lists"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT list_name FROM list_order ORDER BY position")
             return [row["list_name"] for row in cursor.fetchall()]
 
     def set_list_order(self, order: List[str]) -> bool:
-        """Set the order of lists (all disabled by default)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM list_order")
@@ -595,7 +559,6 @@ class Database:
             return True
 
     def mark_player_auctioned(self, list_name: str, player_name: str):
-        """Mark a player as auctioned"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -606,7 +569,6 @@ class Database:
     def get_random_player_from_list(
         self, list_name: str
     ) -> Optional[Tuple[int, str, Optional[int]]]:
-        """Get a random unauctioned player from a list"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -619,7 +581,6 @@ class Database:
             return None
 
     def mark_player_auctioned_by_id(self, player_id: int):
-        """Mark a specific player as auctioned by ID"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -627,18 +588,40 @@ class Database:
             )
 
     def clear_player_lists(self):
-        """Clear all player lists"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM player_lists")
             cursor.execute("DELETE FROM list_order")
 
-    def delete_set(self, set_name: str) -> tuple:
-        """Delete a set/list and all its players from the auction"""
+    def reset_all_player_auction_status(self):
+        """Reset auctioned status for ALL players (allows re-bidding)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
+            cursor.execute("UPDATE player_lists SET auctioned = 0")
 
-            # Check if set exists
+    def clear_released_players(self):
+        """Remove the 'released players' list"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM player_lists WHERE list_name = 'released players'"
+            )
+            cursor.execute(
+                "DELETE FROM list_order WHERE list_name = 'released players'"
+            )
+
+    def clear_unsold_players(self):
+        """Remove the 'unsold players' list"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM player_lists WHERE list_name = 'unsold players'"
+            )
+            cursor.execute("DELETE FROM list_order WHERE list_name = 'unsold players'")
+
+    def delete_set(self, set_name: str) -> tuple:
+        with self._transaction() as conn:
+            cursor = conn.cursor()
             cursor.execute(
                 "SELECT COUNT(*) as cnt FROM list_order WHERE LOWER(list_name) = LOWER(?)",
                 (set_name,),
@@ -646,93 +629,24 @@ class Database:
             if cursor.fetchone()["cnt"] == 0:
                 return (False, f"Set '{set_name}' does not exist")
 
-            # Count players that will be deleted
             cursor.execute(
                 "SELECT COUNT(*) as cnt FROM player_lists WHERE LOWER(list_name) = LOWER(?)",
                 (set_name,),
             )
             player_count = cursor.fetchone()["cnt"]
-
-            # Delete players from set
             cursor.execute(
                 "DELETE FROM player_lists WHERE LOWER(list_name) = LOWER(?)",
                 (set_name,),
             )
-
-            # Delete from list_order
             cursor.execute(
                 "DELETE FROM list_order WHERE LOWER(list_name) = LOWER(?)", (set_name,)
             )
 
             return (True, f"Deleted set '{set_name}' with {player_count} players")
 
-    # ==================== SET ENABLE/DISABLE OPERATIONS ====================
-
-    def enable_sets(self, set_names: List[str]) -> int:
-        """Enable specific sets for auction. Returns count of sets enabled."""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            count = 0
-            for set_name in set_names:
-                cursor.execute(
-                    "UPDATE list_order SET enabled = 1 WHERE LOWER(list_name) = LOWER(?)",
-                    (set_name,),
-                )
-                count += cursor.rowcount
-            return count
-
-    def disable_all_sets(self):
-        """Disable all sets"""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE list_order SET enabled = 0")
-
-    def get_enabled_sets(self) -> List[str]:
-        """Get list of enabled set names in order"""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT list_name FROM list_order WHERE enabled = 1 ORDER BY position"
-            )
-            return [row["list_name"] for row in cursor.fetchall()]
-
-    def get_all_sets_with_status(self) -> List[Tuple[str, bool, int]]:
-        """Get all sets with their enabled status and unauctioned player count.
-        Returns list of (set_name, enabled, remaining_players)"""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT lo.list_name, lo.enabled,
-                       (SELECT COUNT(*) FROM player_lists pl 
-                        WHERE pl.list_name = lo.list_name AND pl.auctioned = 0) as remaining
-                FROM list_order lo
-                ORDER BY lo.position
-                """
-            )
-            return [
-                (row["list_name"], bool(row["enabled"]), row["remaining"])
-                for row in cursor.fetchall()
-            ]
-
-    def has_unauctioned_players_in_enabled_sets(self) -> bool:
-        """Check if any enabled set has unauctioned players"""
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT COUNT(*) as cnt FROM player_lists pl
-                JOIN list_order lo ON pl.list_name = lo.list_name
-                WHERE lo.enabled = 1 AND pl.auctioned = 0
-                """
-            )
-            row = cursor.fetchone()
-            return row["cnt"] > 0 if row else False
-
     # ==================== AUCTION STATE OPERATIONS ====================
 
     def get_auction_state(self) -> dict:
-        """Get current auction state"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM auction_state WHERE id = 1")
@@ -742,7 +656,6 @@ class Database:
             return {}
 
     def update_auction_state(self, **kwargs):
-        """Update auction state fields"""
         if not kwargs:
             return
         with self._transaction() as conn:
@@ -752,7 +665,6 @@ class Database:
             cursor.execute(f"UPDATE auction_state SET {fields} WHERE id = 1", values)
 
     def reset_auction_state(self):
-        """Reset auction state to defaults"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -784,7 +696,6 @@ class Database:
         is_auto_bid: bool = False,
         interaction_id: str = None,
     ):
-        """Record a bid in history"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -806,7 +717,6 @@ class Database:
             )
 
     def get_bid_history_for_player(self, player_name: str) -> List[dict]:
-        """Get all bids for a specific player"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -816,7 +726,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_recent_bids(self, limit: int = 10) -> List[dict]:
-        """Get most recent bids"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -825,7 +734,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_highest_bid_for_player(self, player_name: str) -> Optional[dict]:
-        """Get the highest (latest) bid for a player - authoritative source for sale finalization"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -836,7 +744,6 @@ class Database:
             return dict(row) if row else None
 
     def count_bids_for_player(self, player_name: str) -> int:
-        """Count total bids for a player"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -846,7 +753,6 @@ class Database:
             return cursor.fetchone()["cnt"]
 
     def clear_bid_history(self):
-        """Clear all bid history"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM bid_history")
@@ -854,7 +760,6 @@ class Database:
     # ==================== AUTO-BID OPERATIONS ====================
 
     def set_auto_bid(self, team_code: str, max_amount: int, user_id: int):
-        """Set or update auto-bid for a team"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -866,7 +771,6 @@ class Database:
             )
 
     def get_auto_bid(self, team_code: str) -> Optional[int]:
-        """Get active auto-bid max for a team"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -877,7 +781,6 @@ class Database:
             return row["max_amount"] if row else None
 
     def get_all_auto_bids(self) -> Dict[str, int]:
-        """Get all active auto-bids"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -886,7 +789,6 @@ class Database:
             return {row["team_code"]: row["max_amount"] for row in cursor.fetchall()}
 
     def clear_auto_bid(self, team_code: str):
-        """Deactivate auto-bid for a team"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -894,7 +796,6 @@ class Database:
             )
 
     def clear_all_auto_bids(self):
-        """Clear all auto-bids"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM auto_bids")
@@ -902,7 +803,6 @@ class Database:
     # ==================== USER-TEAM MAPPING ====================
 
     def set_user_team(self, user_id: int, team_code: str, user_name: str = None):
-        """Assign user to team"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -914,7 +814,6 @@ class Database:
             )
 
     def get_user_team(self, user_id: int) -> Optional[str]:
-        """Get team for a user"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -924,21 +823,18 @@ class Database:
             return row["team_code"] if row else None
 
     def get_all_user_teams(self) -> Dict[int, str]:
-        """Get all user-team mappings"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT user_id, team_code FROM user_teams")
             return {row["user_id"]: row["team_code"] for row in cursor.fetchall()}
 
     def remove_user_team(self, user_id: int) -> bool:
-        """Remove user's team assignment"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM user_teams WHERE user_id = ?", (user_id,))
             return cursor.rowcount > 0
 
     def clear_user_teams(self):
-        """Clear all user-team mappings"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM user_teams")
@@ -948,7 +844,6 @@ class Database:
     def record_sale(
         self, player_name: str, team_code: str, final_price: int, total_bids: int = 0
     ):
-        """Record a finalized sale"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -960,14 +855,12 @@ class Database:
             )
 
     def get_all_sales(self) -> List[dict]:
-        """Get all sales"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM sales ORDER BY sold_at")
             return [dict(row) for row in cursor.fetchall()]
 
     def get_last_sale(self) -> Optional[dict]:
-        """Get the most recent sale"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM sales ORDER BY sold_at DESC LIMIT 1")
@@ -975,7 +868,6 @@ class Database:
             return dict(row) if row else None
 
     def delete_sale(self, player_name: str) -> bool:
-        """Delete a sale record (used when re-auctioning unsold players)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -984,7 +876,6 @@ class Database:
             return cursor.rowcount > 0
 
     def rollback_last_sale(self) -> Optional[dict]:
-        """Rollback the last sale - returns the sale data"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM sales ORDER BY sold_at DESC LIMIT 1")
@@ -1000,7 +891,7 @@ class Database:
                 (sale["final_price"], sale["team_code"]),
             )
 
-            # Remove from squad using subquery (standard SQL)
+            # Remove from squad
             cursor.execute(
                 """DELETE FROM team_squads WHERE id = (
                     SELECT id FROM team_squads 
@@ -1016,7 +907,6 @@ class Database:
             return sale
 
     def clear_sales(self):
-        """Clear all sales"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM sales")
@@ -1024,7 +914,6 @@ class Database:
     # ==================== ADDITIONAL OPERATIONS ====================
 
     def get_auctioned_count(self) -> int:
-        """Get count of auctioned players"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1035,11 +924,8 @@ class Database:
     def find_player_by_name(
         self, player_name: str
     ) -> Optional[Tuple[int, str, str, Optional[int], int]]:
-        """Find a player by name (case-insensitive partial match).
-        Returns (id, player_name, list_name, base_price, auctioned) or None"""
         with self._transaction() as conn:
             cursor = conn.cursor()
-            # Try exact match first
             cursor.execute(
                 "SELECT id, player_name, list_name, base_price, auctioned FROM player_lists WHERE LOWER(player_name) = LOWER(?)",
                 (player_name,),
@@ -1054,7 +940,6 @@ class Database:
                     row["auctioned"],
                 )
 
-            # Try partial match
             cursor.execute(
                 "SELECT id, player_name, list_name, base_price, auctioned FROM player_lists WHERE LOWER(player_name) LIKE LOWER(?)",
                 (f"%{player_name}%",),
@@ -1071,7 +956,6 @@ class Database:
             return None
 
     def reset_player_auctioned_status(self, player_id: int):
-        """Reset a player's auctioned status to 0 (bring back to auction)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1079,7 +963,6 @@ class Database:
             )
 
     def delete_last_bid(self, player_name: str):
-        """Delete the last bid for a player"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1088,7 +971,6 @@ class Database:
             )
 
     def get_previous_bid(self, player_name: str) -> Optional[dict]:
-        """Get the current highest bid after removing the last one"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1101,16 +983,9 @@ class Database:
     def trade_player(
         self, player_name: str, from_team: str, to_team: str, price: int
     ) -> bool:
-        """Trade a player between teams.
-
-        Trade logic:
-        - Source team (from_team) receives the TRADE PRICE (not original purchase price)
-        - Target team (to_team) pays the TRADE PRICE
-        """
         with self._transaction() as conn:
             cursor = conn.cursor()
 
-            # Check if player exists in source team
             cursor.execute(
                 "SELECT id, price, player_name FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
                 (from_team, player_name),
@@ -1119,44 +994,38 @@ class Database:
             if not row:
                 return False
 
-            original_price = row["price"]  # Keep for reference but don't use for refund
-            actual_player_name = row["player_name"]  # Get actual name with correct case
+            original_price = row["price"]
+            actual_player_name = row["player_name"]
 
-            # Check if target team has enough purse BEFORE making changes
             cursor.execute(
                 "SELECT purse FROM teams WHERE team_code = ?",
                 (to_team,),
             )
             target_purse = cursor.fetchone()
             if not target_purse or target_purse["purse"] < price:
-                return False  # Insufficient purse
+                return False
 
-            # Remove from source team
             cursor.execute(
                 "DELETE FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
                 (from_team, player_name),
             )
 
-            # Refund source team with TRADE PRICE (not original price)
             cursor.execute(
                 "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
                 (price, from_team),
             )
 
-            # Deduct from target team (already validated above)
             cursor.execute(
                 "UPDATE teams SET purse = purse - ? WHERE team_code = ?",
                 (price, to_team),
             )
 
-            # Add to target team with trade info
             cursor.execute(
                 """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
                    VALUES (?, ?, ?, 'traded', ?)""",
                 (to_team, actual_player_name, price, from_team),
             )
 
-            # Record trade in trade_history table (separate from sales)
             cursor.execute(
                 """INSERT INTO trade_history (player_name, from_team, to_team, trade_price, original_price)
                    VALUES (?, ?, ?, ?, ?)""",
@@ -1166,13 +1035,11 @@ class Database:
             return True
 
     def get_stats_data(self) -> dict:
-        """Get statistics for live display"""
         with self._transaction() as conn:
             cursor = conn.cursor()
 
-            # Most expensive player - EXCLUDE trades and releases
             cursor.execute(
-                """SELECT player_name, final_price FROM sales 
+                """SELECT player_name, final_price, team_code FROM sales 
                    WHERE player_name NOT LIKE '%(TRADE%' 
                    AND player_name NOT LIKE '%(RELEASED%'
                    AND team_code != 'UNSOLD'
@@ -1180,19 +1047,16 @@ class Database:
             )
             most_expensive = cursor.fetchone()
 
-            # Team with most players
             cursor.execute(
                 "SELECT team_code, COUNT(*) as cnt FROM team_squads GROUP BY team_code ORDER BY cnt DESC LIMIT 1"
             )
             most_players = cursor.fetchone()
 
-            # Team with least players (that has at least 1)
             cursor.execute(
                 "SELECT team_code, COUNT(*) as cnt FROM team_squads GROUP BY team_code ORDER BY cnt ASC LIMIT 1"
             )
             least_players = cursor.fetchone()
 
-            # All purses
             cursor.execute("SELECT team_code, purse FROM teams ORDER BY team_code")
             purses = {row["team_code"]: row["purse"] for row in cursor.fetchall()}
 
@@ -1204,7 +1068,6 @@ class Database:
             }
 
     def get_all_unauctioned_players(self) -> List[Tuple[str, str, Optional[int]]]:
-        """Get all unauctioned players with their list and base price"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1216,11 +1079,8 @@ class Database:
             ]
 
     def get_unsold_players(self) -> List[Tuple[int, str, str, Optional[int]]]:
-        """Get all players that were auctioned but not sold (unsold players).
-        Returns list of (id, player_name, list_name, base_price)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
-            # Players marked as auctioned but not in any squad
             cursor.execute(
                 """
                 SELECT pl.id, pl.player_name, pl.list_name, pl.base_price 
@@ -1239,17 +1099,9 @@ class Database:
             ]
 
     def get_unsold_players_for_excel(self) -> List[Tuple[str, str, Optional[int]]]:
-        """Get unsold players formatted for Excel export.
-        Returns list of (player_name, set_name, base_price)
-
-        Gets from two sources:
-        1. Players marked as auctioned in player_lists but not in any squad
-        2. Players in sales table with team_code='UNSOLD'
-        """
         with self._transaction() as conn:
             cursor = conn.cursor()
 
-            # Get from player_lists (auctioned but not sold)
             cursor.execute(
                 """
                 SELECT pl.player_name, pl.list_name, pl.base_price 
@@ -1267,7 +1119,6 @@ class Database:
                 for row in cursor.fetchall()
             ]
 
-            # Get from sales table (recorded as UNSOLD)
             cursor.execute(
                 """
                 SELECT player_name, final_price
@@ -1281,7 +1132,6 @@ class Database:
                 for row in cursor.fetchall()
             ]
 
-            # Combine both lists, avoiding duplicates (by lowercase player name)
             seen = set()
             result = []
             for player_name, set_name, base_price in from_player_lists:
@@ -1297,13 +1147,8 @@ class Database:
             return result
 
     def get_released_players_for_excel(self) -> List[Tuple[str, str, Optional[int]]]:
-        """Get released players formatted for Excel export.
-        Returns list of (player_name, released_from_team, price)
-        """
         with self._transaction() as conn:
             cursor = conn.cursor()
-
-            # Get from sales table (recorded as RELEASED)
             cursor.execute(
                 """
                 SELECT player_name, final_price
@@ -1318,8 +1163,6 @@ class Database:
             ]
 
     def get_team_bid_history(self, team_code: str, limit: int = 50) -> List[dict]:
-        """Get bid history for a specific team with player names.
-        Returns list of bid records."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1335,7 +1178,6 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     def reauction_multiple_players(self, player_ids: List[int]) -> int:
-        """Reset auctioned status for multiple players. Returns count of players re-auctioned."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             count = 0
@@ -1349,7 +1191,7 @@ class Database:
     # ==================== FULL RESET ====================
 
     def full_reset(self):
-        """Complete reset of all auction data"""
+        """Complete reset of all auction data (including retained)"""
         self.reset_auction_state()
         self.reset_teams()
         self.clear_squads()
@@ -1361,23 +1203,19 @@ class Database:
         self.clear_trade_history()
 
     def clear_trade_history(self):
-        """Clear all trade history"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM trade_history")
 
     def get_all_trades(self) -> List[dict]:
-        """Get all trade records"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trade_history ORDER BY traded_at")
             return [dict(row) for row in cursor.fetchall()]
 
     def remove_duplicate_players(self):
-        """Remove duplicate players from squads, keeping only the first entry"""
         with self._transaction() as conn:
             cursor = conn.cursor()
-            # Find and remove duplicates, keeping the earliest entry
             cursor.execute(
                 """
                 DELETE FROM team_squads 
@@ -1391,10 +1229,8 @@ class Database:
             return removed
 
     def move_player_to_set(self, player_name: str, target_set: str) -> bool:
-        """Move a player from one set to another"""
         with self._transaction() as conn:
             cursor = conn.cursor()
-            # Check if player exists
             cursor.execute(
                 "SELECT id FROM player_lists WHERE LOWER(player_name) = LOWER(?)",
                 (player_name,),
@@ -1402,13 +1238,11 @@ class Database:
             if not cursor.fetchone():
                 return False
 
-            # Create target set if doesn't exist
             cursor.execute(
                 "INSERT OR IGNORE INTO list_order (position, list_name) VALUES ((SELECT COALESCE(MAX(position), 0) + 1 FROM list_order), ?)",
                 (target_set.lower(),),
             )
 
-            # Move player
             cursor.execute(
                 "UPDATE player_lists SET list_name = ? WHERE LOWER(player_name) = LOWER(?)",
                 (target_set.lower(), player_name),
@@ -1420,21 +1254,9 @@ class Database:
     def finalize_sale_atomic(
         self, player_name: str, team_code: str, amount: int, bid_count: int
     ) -> Tuple[bool, str]:
-        """Atomically finalize a sale - all operations in single transaction.
-
-        This ensures data integrity by performing all sale operations atomically:
-        1. Verify player not already sold (double-sell prevention)
-        2. Deduct purse from winning team
-        3. Add player to team's squad
-        4. Record the sale
-
-        Returns:
-            Tuple of (success: bool, error_message: str)
-        """
         with self._transaction() as conn:
             cursor = conn.cursor()
 
-            # 1. Check if player is already in any squad (double-sell prevention)
             cursor.execute(
                 "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
                 (player_name,),
@@ -1443,7 +1265,6 @@ class Database:
             if existing:
                 return False, f"Player already sold to {existing['team_code']}"
 
-            # 2. Deduct from purse (atomic check-and-deduct)
             cursor.execute(
                 "UPDATE teams SET purse = purse - ? WHERE team_code = ? AND purse >= ?",
                 (amount, team_code, amount),
@@ -1451,7 +1272,6 @@ class Database:
             if cursor.rowcount == 0:
                 return False, "Insufficient purse"
 
-            # 3. Add to squad
             try:
                 cursor.execute(
                     """INSERT INTO team_squads (team_code, player_name, price, acquisition_type) 
@@ -1461,7 +1281,6 @@ class Database:
             except sqlite3.IntegrityError:
                 return False, "Player already exists in a squad"
 
-            # 4. Record sale
             cursor.execute(
                 """INSERT INTO sales (player_name, team_code, final_price, total_bids)
                    VALUES (?, ?, ?, ?)""",
@@ -1471,23 +1290,16 @@ class Database:
             return True, "Sale completed successfully"
 
     def record_unsold_atomic(self, player_name: str, base_price: int) -> bool:
-        """Atomically record a player as unsold.
-
-        Returns:
-            bool: True if recorded successfully
-        """
         with self._transaction() as conn:
             cursor = conn.cursor()
 
-            # Check player not already sold
             cursor.execute(
                 "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
                 (player_name,),
             )
             if cursor.fetchone():
-                return False  # Player was sold, don't mark as unsold
+                return False
 
-            # Record as unsold
             cursor.execute(
                 """INSERT INTO sales (player_name, team_code, final_price, total_bids)
                    VALUES (?, 'UNSOLD', ?, 0)""",
