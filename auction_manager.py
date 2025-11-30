@@ -791,9 +791,10 @@ class AuctionManager:
                 sales = self.db.get_all_sales()
                 unsold = self.db.get_unsold_players_for_excel()
                 released = self.db.get_released_players_for_excel()
+                trades = self.db.get_all_trades()
 
                 self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads, unsold, released
+                    self.excel_file, sales, teams, squads, unsold, released, trades
                 )
             except Exception as e:
                 logger.error(f"Error updating Excel after trade: {e}")
@@ -846,9 +847,10 @@ class AuctionManager:
             sales = self.db.get_all_sales()
             unsold = self.db.get_unsold_players_for_excel()
             released = self.db.get_released_players_for_excel()
+            trades = self.db.get_all_trades()
 
             self.file_manager.regenerate_excel_from_db(
-                self.excel_file, sales, teams, squads, unsold, released
+                self.excel_file, sales, teams, squads, unsold, released, trades
             )
         except Exception as e:
             logger.error(f"Error updating Excel after manual add: {e}")
@@ -1080,9 +1082,10 @@ class AuctionManager:
             sales = self.db.get_all_sales()
             unsold = self.db.get_unsold_players_for_excel()
             released = self.db.get_released_players_for_excel()
+            trades = self.db.get_all_trades()
 
             self.file_manager.regenerate_excel_from_db(
-                self.excel_file, sales, teams, squads, unsold, released
+                self.excel_file, sales, teams, squads, unsold, released, trades
             )
         except Exception as e:
             logger.error(f"Error updating Excel after release: {e}")
@@ -1137,6 +1140,7 @@ class AuctionManager:
                     sales = self.db.get_all_sales()
                     unsold = self.db.get_unsold_players_for_excel()
                     released = self.db.get_released_players_for_excel()
+                    trades = self.db.get_all_trades()
 
                     await asyncio.to_thread(
                         self.file_manager.regenerate_excel_from_db,
@@ -1146,6 +1150,7 @@ class AuctionManager:
                         squads,
                         unsold,
                         released,
+                        trades,
                     )
                 except Exception as e:
                     logger.error(f"Error saving to Excel: {e}")
@@ -1175,6 +1180,7 @@ class AuctionManager:
                     sales = self.db.get_all_sales()
                     unsold = self.db.get_unsold_players_for_excel()
                     released = self.db.get_released_players_for_excel()
+                    trades = self.db.get_all_trades()
 
                     await asyncio.to_thread(
                         self.file_manager.regenerate_excel_from_db,
@@ -1184,6 +1190,7 @@ class AuctionManager:
                         squads,
                         unsold,
                         released,
+                        trades,
                     )
                 except Exception as e:
                     logger.error(f"Error saving to Excel (Unsold): {e}")
@@ -1260,9 +1267,10 @@ class AuctionManager:
                 sales = self.db.get_all_sales()
                 unsold = self.db.get_unsold_players_for_excel()
                 released = self.db.get_released_players_for_excel()
+                trades = self.db.get_all_trades()
 
                 self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads, unsold, released
+                    self.excel_file, sales, teams, squads, unsold, released, trades
                 )
             except Exception as e:
                 logger.error(f"Error updating Excel on rollback: {e}")

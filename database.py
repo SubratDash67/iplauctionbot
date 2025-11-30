@@ -248,6 +248,21 @@ class Database:
             """
             )
 
+            # Trade history (separate from sales)
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trade_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    player_name TEXT NOT NULL,
+                    from_team TEXT NOT NULL,
+                    to_team TEXT NOT NULL,
+                    trade_price INTEGER NOT NULL,
+                    original_price INTEGER NOT NULL,
+                    traded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
     # ==================== TEAM OPERATIONS ====================
 
     def init_teams(self, teams: Dict[str, int]):
@@ -1060,7 +1075,12 @@ class Database:
     def trade_player(
         self, player_name: str, from_team: str, to_team: str, price: int
     ) -> bool:
-        """Trade a player between teams"""
+        """Trade a player between teams.
+
+        Trade logic:
+        - Source team (from_team) receives the TRADE PRICE (not original purchase price)
+        - Target team (to_team) pays the TRADE PRICE
+        """
         with self._transaction() as conn:
             cursor = conn.cursor()
 
@@ -1073,7 +1093,7 @@ class Database:
             if not row:
                 return False
 
-            original_price = row["price"]
+            original_price = row["price"]  # Keep for reference but don't use for refund
             actual_player_name = row["player_name"]  # Get actual name with correct case
 
             # Check if target team has enough purse BEFORE making changes
@@ -1091,10 +1111,10 @@ class Database:
                 (from_team, player_name),
             )
 
-            # Refund source team
+            # Refund source team with TRADE PRICE (not original price)
             cursor.execute(
                 "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
-                (original_price, from_team),
+                (price, from_team),
             )
 
             # Deduct from target team (already validated above)
@@ -1110,20 +1130,11 @@ class Database:
                 (to_team, actual_player_name, price, from_team),
             )
 
-            # Remove original sale record (if exists) to avoid duplicates
+            # Record trade in trade_history table (separate from sales)
             cursor.execute(
-                "DELETE FROM sales WHERE LOWER(player_name) = LOWER(?) OR LOWER(player_name) LIKE LOWER(?)",
-                (actual_player_name, f"{actual_player_name} (TRADE%"),
-            )
-
-            # Record the trade in sales table (so it appears in Auction Results)
-            # Mark as TRADE type so it's excluded from most expensive stats
-            cursor.execute(
-                """
-                INSERT INTO sales (player_name, team_code, final_price)
-                VALUES (?, ?, ?)
-            """,
-                (f"{actual_player_name} (TRADE from {from_team})", to_team, price),
+                """INSERT INTO trade_history (player_name, from_team, to_team, trade_price, original_price)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (actual_player_name, from_team, to_team, price, original_price),
             )
 
             return True
@@ -1321,6 +1332,20 @@ class Database:
         self.clear_all_auto_bids()
         self.clear_user_teams()
         self.clear_sales()
+        self.clear_trade_history()
+
+    def clear_trade_history(self):
+        """Clear all trade history"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM trade_history")
+
+    def get_all_trades(self) -> List[dict]:
+        """Get all trade records"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trade_history ORDER BY traded_at")
+            return [dict(row) for row in cursor.fetchall()]
 
     def remove_duplicate_players(self):
         """Remove duplicate players from squads, keeping only the first entry"""

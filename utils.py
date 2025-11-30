@@ -8,7 +8,7 @@ import logging
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 import os
 
 # Set up module-level logger
@@ -217,6 +217,9 @@ class FileManager:
             start_color="366092", end_color="366092", fill_type="solid"
         )
         header_font = Font(bold=True, color="FFFFFF")
+        trade_header_fill = PatternFill(
+            start_color="7030A0", end_color="7030A0", fill_type="solid"
+        )
 
         # Sheet 1: Auction Results
         sheet = wb.active
@@ -244,7 +247,24 @@ class FileManager:
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center")
 
-        # Sheet 4+: Individual Team Sheets
+        # Sheet 4: Trade History
+        trade_sheet = wb.create_sheet("Trade History")
+        trade_sheet.append(
+            [
+                "Player Name",
+                "From Team",
+                "To Team",
+                "Trade Price",
+                "Original Price",
+                "Timestamp",
+            ]
+        )
+        for cell in trade_sheet[1]:
+            cell.fill = trade_header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        # Sheet 5+: Individual Team Sheets
         from config import TEAMS
 
         for team_code in sorted(TEAMS.keys()):
@@ -520,11 +540,82 @@ class FileManager:
             raise Exception(f"Error updating released players sheet: {str(e)}")
 
     @staticmethod
+    def update_trade_history_sheet(
+        filepath: str,
+        trades: List[dict],
+    ) -> None:
+        """Update the trade history sheet
+
+        Args:
+            filepath: Path to Excel file
+            trades: List of trade records with keys: player_name, from_team, to_team, trade_price, original_price, traded_at
+        """
+        try:
+            if not os.path.exists(filepath):
+                FileManager.initialize_excel(filepath)
+            wb = openpyxl.load_workbook(filepath)
+
+            # Remove existing sheet if present
+            if "Trade History" in wb.sheetnames:
+                del wb["Trade History"]
+
+            # Create at position 3 (after Unsold Players)
+            ts = wb.create_sheet("Trade History", 3)
+            ts.append(
+                [
+                    "Player Name",
+                    "From Team",
+                    "To Team",
+                    "Trade Price",
+                    "Original Price",
+                    "Timestamp",
+                ]
+            )
+
+            header_fill = PatternFill(
+                start_color="7030A0", end_color="7030A0", fill_type="solid"
+            )
+            header_font = Font(bold=True, color="FFFFFF")
+            for cell in ts[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center")
+
+            if trades:
+                for trade in trades:
+                    safe_player = sanitize_csv_value(
+                        trade.get("player_name", "Unknown")
+                    )
+                    ts.append(
+                        [
+                            safe_player,
+                            trade.get("from_team", "Unknown"),
+                            trade.get("to_team", "Unknown"),
+                            format_amount(trade.get("trade_price", 0)),
+                            format_amount(trade.get("original_price", 0)),
+                            trade.get("traded_at", ""),
+                        ]
+                    )
+
+            # Auto-fit column widths
+            ts.column_dimensions["A"].width = 30
+            ts.column_dimensions["B"].width = 12
+            ts.column_dimensions["C"].width = 12
+            ts.column_dimensions["D"].width = 15
+            ts.column_dimensions["E"].width = 15
+            ts.column_dimensions["F"].width = 20
+
+            wb.save(filepath)
+        except Exception as e:
+            raise Exception(f"Error updating trade history sheet: {str(e)}")
+
+    @staticmethod
     def update_individual_team_sheets(
         filepath: str,
         teams: Dict[str, int],
         team_squads: Dict[str, List[Tuple[str, int]]],
         retained_players: Dict[str, List[Tuple[str, int]]] = None,
+        traded_to_team: Dict[str, Set[str]] = None,
     ) -> None:
         """Update individual team sheets with squad details
 
@@ -533,6 +624,7 @@ class FileManager:
             teams: Team purses
             team_squads: All squad data from database
             retained_players: Retained players dict (optional, will import if not provided)
+            traded_to_team: Dict mapping team code to set of player names traded TO that team
         """
         try:
             if not os.path.exists(filepath):
@@ -542,6 +634,9 @@ class FileManager:
                 from retained_players import RETAINED_PLAYERS
 
                 retained_players = RETAINED_PLAYERS
+
+            if traded_to_team is None:
+                traded_to_team = {}
 
             wb = openpyxl.load_workbook(filepath)
 
@@ -556,9 +651,7 @@ class FileManager:
 
             from config import TEAMS
 
-            sheet_position = (
-                3  # Start after Auction Results, Team Summary, Unsold Players
-            )
+            sheet_position = 4  # Start after Auction Results, Team Summary, Unsold Players, Trade History
 
             for team_code in sorted(TEAMS.keys()):
                 # Remove existing sheet if present
@@ -579,16 +672,17 @@ class FileManager:
                 squad = team_squads.get(team_code, [])
                 retained = retained_players.get(team_code, [])
                 retained_names = {p[0].lower() for p in retained}
+                traded_names = {p.lower() for p in traded_to_team.get(team_code, set())}
 
                 total_spent = 0
 
                 # Add players
                 for player_name, price in squad:
-                    player_type = (
-                        "Retained"
-                        if player_name.lower() in retained_names
-                        else "Bought"
-                    )
+                    # Determine player type: Traded > Bought (retained players shown as Bought)
+                    if player_name.lower() in traded_names:
+                        player_type = "Traded"
+                    else:
+                        player_type = "Bought"
                     safe_player = sanitize_csv_value(player_name)
                     ts.append([safe_player, format_amount(price), player_type])
                     total_spent += price
@@ -625,6 +719,7 @@ class FileManager:
         team_squads: Dict[str, List[Tuple[str, int]]],
         unsold_players: List[Tuple[str, str, Optional[int]]] = None,
         released_players: List[Tuple[str, str, Optional[int]]] = None,
+        trades: List[dict] = None,
     ) -> None:
         """Regenerate the entire Excel file from database records.
 
@@ -637,6 +732,7 @@ class FileManager:
             team_squads: All squad data
             unsold_players: List of (player_name, set_name, base_price) for unsold players
             released_players: List of (player_name, released_from, price) for released players
+            trades: List of trade records from trade_history table
         """
         try:
             # Initialize fresh Excel file with all sheets
@@ -680,8 +776,25 @@ class FileManager:
             if released_players:
                 FileManager.update_released_players_sheet(filepath, released_players)
 
+            # Update Trade History sheet
+            if trades:
+                FileManager.update_trade_history_sheet(filepath, trades)
+
+            # Build traded_to_team mapping for individual team sheets
+            traded_to_team: Dict[str, Set[str]] = {}
+            if trades:
+                for trade in trades:
+                    to_team = trade.get("to_team")
+                    player_name = trade.get("player_name")
+                    if to_team and player_name:
+                        if to_team not in traded_to_team:
+                            traded_to_team[to_team] = set()
+                        traded_to_team[to_team].add(player_name)
+
             # Update Individual Team Sheets
-            FileManager.update_individual_team_sheets(filepath, teams, team_squads)
+            FileManager.update_individual_team_sheets(
+                filepath, teams, team_squads, traded_to_team=traded_to_team
+            )
 
         except Exception as e:
             raise Exception(f"Error regenerating Excel: {str(e)}")
@@ -792,17 +905,29 @@ class MessageFormatter:
         current_players = len(squad)
         total_spent = sum(price for _, price, _, _ in squad) if squad else 0
 
+        # Separate players by type
+        traded_players = [(p, pr, s) for p, pr, acq, s in squad if acq == "traded"]
+        bought_players = [
+            (p, pr) for p, pr, acq, _ in squad if acq == "bought" or acq == "retained"
+        ]
+
         msg = f"**{team_code} Squad:**\n```\n"
-        if squad:
-            for player, price, acq_type, source in squad:
-                type_str = ""
-                if acq_type == "traded" and source:
-                    type_str = f" [Traded from {source}]"
-                elif acq_type == "retained":
-                    type_str = " [Retained]"
-                msg += f"{player:25} : {format_amount(price)}{type_str}\n"
-        else:
+
+        if bought_players:
+            msg += "--- Bought ---\n"
+            for player, price in bought_players:
+                msg += f"{player:25} : {format_amount(price)}\n"
+
+        if traded_players:
+            if bought_players:
+                msg += "\n"
+            msg += "--- Traded ---\n"
+            for player, price, source in traded_players:
+                msg += f"{player:25} : {format_amount(price)} [from {source}]\n"
+
+        if not bought_players and not traded_players:
             msg += "No players yet.\n"
+
         msg += f"\n{'='*50}\n"
         msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
         msg += f"{'Remaining Purse':30} : {format_amount(purse)}\n"
