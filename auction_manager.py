@@ -97,7 +97,9 @@ class AuctionManager:
 
             for player_name, salary in players:
                 if player_name.lower() not in existing_players:
-                    self.db.add_to_squad(team_code, player_name, salary)
+                    self.db.add_to_squad(
+                        team_code, player_name, salary, acquisition_type="retained"
+                    )
 
     def _auto_load_csv_players(self):
         pass
@@ -710,37 +712,38 @@ class AuctionManager:
             original_bid_amount=min_bid,
         )
 
-    def undo_last_bid(self) -> Tuple[bool, str]:
-        """Undo the last bid on the current player"""
-        if not self.active or not self.current_player:
-            return False, "No active player auction."
+    async def undo_last_bid(self) -> Tuple[bool, str]:
+        """Undo the last bid on the current player (thread-safe)"""
+        async with self._bid_lock:
+            if not self.active or not self.current_player:
+                return False, "No active player auction."
 
-        # Get history
-        history = self.db.get_bid_history_for_player(self.current_player)
-        if not history:
-            return False, "No bids to undo."
+            # Get history
+            history = self.db.get_bid_history_for_player(self.current_player)
+            if not history:
+                return False, "No bids to undo."
 
-        # Remove last bid
-        self.db.delete_last_bid(self.current_player)
+            # Remove last bid
+            self.db.delete_last_bid(self.current_player)
 
-        # Get new state
-        previous = self.db.get_previous_bid(self.current_player)
+            # Get new state
+            previous = self.db.get_previous_bid(self.current_player)
 
-        if previous:
-            self.current_bid = previous["amount"]
-            self.highest_bidder = previous["team_code"]
-            self.last_bid_time = previous["timestamp"]
-        else:
-            # Back to base price
-            self.current_bid = self.base_price
-            self.highest_bidder = None
-            self.last_bid_time = time.time()
+            if previous:
+                self.current_bid = previous["amount"]
+                self.highest_bidder = previous["team_code"]
+                self.last_bid_time = previous["timestamp"]
+            else:
+                # Back to base price
+                self.current_bid = self.base_price
+                self.highest_bidder = None
+                self.last_bid_time = time.time()
 
-        self._save_state_to_db()
-        return (
-            True,
-            f"Undo successful. Current bid: {format_amount(self.current_bid)} by {self.highest_bidder or 'None'}",
-        )
+            self._save_state_to_db()
+            return (
+                True,
+                f"Undo successful. Current bid: {format_amount(self.current_bid)} by {self.highest_bidder or 'None'}",
+            )
 
     # ==================== TRADING & MANUAL ====================
     def trade_player(
@@ -776,9 +779,10 @@ class AuctionManager:
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
                 unsold = self.db.get_unsold_players_for_excel()
+                released = self.db.get_released_players_for_excel()
 
                 self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads, unsold
+                    self.excel_file, sales, teams, squads, unsold, released
                 )
             except Exception as e:
                 logger.error(f"Error updating Excel after trade: {e}")
@@ -799,6 +803,10 @@ class AuctionManager:
             player: Player name
             price_cr: Price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)
         """
+        # Validate price is positive
+        if price_cr <= 0:
+            return False, "Price must be a positive value."
+
         team_upper = team.upper()
         teams = self.db.get_teams()
 
@@ -826,9 +834,10 @@ class AuctionManager:
             squads = self.db.get_all_squads()
             sales = self.db.get_all_sales()
             unsold = self.db.get_unsold_players_for_excel()
+            released = self.db.get_released_players_for_excel()
 
             self.file_manager.regenerate_excel_from_db(
-                self.excel_file, sales, teams, squads, unsold
+                self.excel_file, sales, teams, squads, unsold, released
             )
         except Exception as e:
             logger.error(f"Error updating Excel after manual add: {e}")
@@ -1031,23 +1040,26 @@ class AuctionManager:
         except Exception as e:
             logger.error(f"Error releasing player from DB: {e}")
 
-        # 3. Add released player to sales table as UNSOLD so it appears in Excel
+        # 3. Add released player to sales table as RELEASED (not UNSOLD)
         try:
             self.db.record_sale(
-                f"{p_name} (RELEASED from {team_upper})", "UNSOLD", salary, total_bids=0
+                f"{p_name} (RELEASED from {team_upper})",
+                "RELEASED",
+                salary,
+                total_bids=0,
             )
         except Exception as e:
             logger.error(f"Error adding released player to sales: {e}")
 
-        # 4. Add to "unsold players" list for re-auction
-        unsold_list_name = "unsold players"
-        self.db.create_list(unsold_list_name)
-        self.db.add_player_to_list(unsold_list_name, p_name, salary)
+        # 4. Add to "released players" list for re-auction (separate from unsold)
+        released_list_name = "released players"
+        self.db.create_list(released_list_name)
+        self.db.add_player_to_list(released_list_name, p_name, salary)
 
-        # Ensure "unsold players" list is at the end of list order
+        # Ensure "released players" list is at the end of list order
         current_order = self.db.get_list_order()
-        if unsold_list_name not in [o.lower() for o in current_order]:
-            current_order.append(unsold_list_name)
+        if released_list_name not in [o.lower() for o in current_order]:
+            current_order.append(released_list_name)
             self.db.set_list_order(current_order)
 
         # 5. Update Excel
@@ -1056,99 +1068,120 @@ class AuctionManager:
             squads = self.db.get_all_squads()
             sales = self.db.get_all_sales()
             unsold = self.db.get_unsold_players_for_excel()
+            released = self.db.get_released_players_for_excel()
 
             self.file_manager.regenerate_excel_from_db(
-                self.excel_file, sales, teams, squads, unsold
+                self.excel_file, sales, teams, squads, unsold, released
             )
         except Exception as e:
             logger.error(f"Error updating Excel after release: {e}")
 
         return (
             True,
-            f'Released {p_name} from {team_upper}. Refunded {format_amount(salary)}. Player added to "Unsold Players" list.',
-        )  # ==================== SALE FINALIZATION ====================
+            f'Released {p_name} from {team_upper}. Refunded {format_amount(salary)}. Player added to "Released Players" list.',
+        )
 
-    def finalize_sale(self) -> Tuple[bool, Optional[str], int]:
-        self._load_state_from_db()
+    # ==================== SALE FINALIZATION ====================
 
-        if not self.current_player:
-            return False, None, 0
+    async def finalize_sale(self) -> Tuple[bool, Optional[str], int]:
+        """Finalize the current player sale using atomic database operations.
 
-        player = self.current_player
+        Uses _bid_lock to prevent race conditions with concurrent bids.
+        Uses atomic database operations to ensure data integrity.
+        """
+        async with self._bid_lock:
+            self._load_state_from_db()
 
-        # CRITICAL FIX: Get the winning bid from bid_history table - authoritative source
-        # This prevents the "wrong team sold" bug caused by stale in-memory state
-        highest_bid = self.db.get_highest_bid_for_player(player)
-
-        # Check if already sold (Double-Sold Safety)
-        squads = self.db.get_all_squads()
-        for squad in squads.values():
-            for pname, _ in squad:
-                if pname.lower() == player.lower():
-                    # Player is already in a squad, probably from a previous run or race condition
-                    self._reset_player_state()
-                    self._save_state_to_db()  # Persist the cleared state
-                    return False, None, 0
-
-        if highest_bid:
-            team = highest_bid["team_code"]
-            amount = highest_bid["amount"]
-
-            if not self.db.deduct_from_purse(team, amount):
+            if not self.current_player:
                 return False, None, 0
 
-            self.db.add_to_squad(team, player, amount)
+            player = self.current_player
 
-            bid_count = self.db.count_bids_for_player(player)
-            self.db.record_sale(player, team, amount, bid_count)
+            # CRITICAL FIX: Get the winning bid from bid_history table - authoritative source
+            # This prevents the "wrong team sold" bug caused by stale in-memory state
+            highest_bid = self.db.get_highest_bid_for_player(player)
 
-            try:
-                teams = self.db.get_teams()
-                squads = self.db.get_all_squads()
-                sales = self.db.get_all_sales()
-                unsold = self.db.get_unsold_players_for_excel()
+            if highest_bid:
+                team = highest_bid["team_code"]
+                amount = highest_bid["amount"]
+                bid_count = self.db.count_bids_for_player(player)
 
-                self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads, unsold
+                # Use atomic sale operation - all or nothing
+                success, error_msg = self.db.finalize_sale_atomic(
+                    player, team, amount, bid_count
                 )
-            except Exception as e:
-                logger.error(f"Error saving to Excel: {e}")
 
-            # CRITICAL: Clear player state AFTER successful sale to prevent double-sell
-            self._reset_player_state()
-            self._save_state_to_db()
+                if not success:
+                    logger.warning(f"Atomic sale failed for {player}: {error_msg}")
+                    # Player might already be sold - clear state and move on
+                    self._reset_player_state()
+                    self._save_state_to_db()
+                    return False, None, 0
 
-            return True, team, amount
+                # Update Excel (non-critical, outside transaction)
+                # Use asyncio.to_thread to prevent blocking the event loop
+                try:
+                    teams = self.db.get_teams()
+                    squads = self.db.get_all_squads()
+                    sales = self.db.get_all_sales()
+                    unsold = self.db.get_unsold_players_for_excel()
+                    released = self.db.get_released_players_for_excel()
 
-        else:
-            # No bids - player goes UNSOLD
-            team = "UNSOLD"
-            amount = self.base_price or 0
+                    await asyncio.to_thread(
+                        self.file_manager.regenerate_excel_from_db,
+                        self.excel_file,
+                        sales,
+                        teams,
+                        squads,
+                        unsold,
+                        released,
+                    )
+                except Exception as e:
+                    logger.error(f"Error saving to Excel: {e}")
 
-            # Record directly to sales table
-            try:
-                self.db.record_sale(player, team, amount, 0)
-            except Exception as e:
-                logger.error(f"Failed to record UNSOLD in DB: {e}")
+                # Clear player state AFTER successful sale
+                self._reset_player_state()
+                self._save_state_to_db()
 
-            # Trigger Excel update with unsold players
-            try:
-                teams = self.db.get_teams()
-                squads = self.db.get_all_squads()
-                sales = self.db.get_all_sales()
-                unsold = self.db.get_unsold_players_for_excel()
+                return True, team, amount
 
-                self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads, unsold
-                )
-            except Exception as e:
-                logger.error(f"Error saving to Excel (Unsold): {e}")
+            else:
+                # No bids - player goes UNSOLD
+                team = "UNSOLD"
+                amount = self.base_price or 0
 
-            # Clear state
-            self._reset_player_state()
-            self._save_state_to_db()
+                # Use atomic unsold recording
+                try:
+                    self.db.record_unsold_atomic(player, amount)
+                except Exception as e:
+                    logger.error(f"Failed to record UNSOLD in DB: {e}")
 
-            return True, "UNSOLD", amount
+                # Update Excel (non-critical)
+                # Use asyncio.to_thread to prevent blocking the event loop
+                try:
+                    teams = self.db.get_teams()
+                    squads = self.db.get_all_squads()
+                    sales = self.db.get_all_sales()
+                    unsold = self.db.get_unsold_players_for_excel()
+                    released = self.db.get_released_players_for_excel()
+
+                    await asyncio.to_thread(
+                        self.file_manager.regenerate_excel_from_db,
+                        self.excel_file,
+                        sales,
+                        teams,
+                        squads,
+                        unsold,
+                        released,
+                    )
+                except Exception as e:
+                    logger.error(f"Error saving to Excel (Unsold): {e}")
+
+                # Clear state
+                self._reset_player_state()
+                self._save_state_to_db()
+
+                return True, "UNSOLD", amount
 
     # ==================== ADMIN OPERATIONS ====================
 
@@ -1169,6 +1202,43 @@ class AuctionManager:
         self.stats_channel_id = channel_id
         self._save_state_to_db()
 
+    def _create_backup(self) -> str:
+        """Create a JSON backup of all auction data.
+
+        Returns:
+            Path to the backup file
+        """
+        import json
+        from datetime import datetime
+
+        backup_data = {
+            "timestamp": datetime.now().isoformat(),
+            "teams": self.db.get_teams(),
+            "squads": {
+                team: [(p, price) for p, price in players]
+                for team, players in self.db.get_all_squads().items()
+            },
+            "sales": self.db.get_all_sales(),
+            "player_lists": self.db.get_all_lists(),
+            "list_order": self.db.get_list_order(),
+            "state": {
+                "active": self.active,
+                "paused": self.paused,
+                "current_player": self.current_player,
+                "current_bid": self.current_bid,
+                "highest_bidder": self.highest_bidder,
+                "base_price": self.base_price,
+            },
+        }
+
+        backup_filename = (
+            f"auction_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        with open(backup_filename, "w", encoding="utf-8") as f:
+            json.dump(backup_data, f, indent=2, default=str)
+
+        return backup_filename
+
     def rollback_last_sale(self) -> Optional[dict]:
         sale = self.db.rollback_last_sale()
 
@@ -1178,16 +1248,30 @@ class AuctionManager:
                 squads = self.db.get_all_squads()
                 sales = self.db.get_all_sales()
                 unsold = self.db.get_unsold_players_for_excel()
+                released = self.db.get_released_players_for_excel()
 
                 self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads, unsold
+                    self.excel_file, sales, teams, squads, unsold, released
                 )
             except Exception as e:
                 logger.error(f"Error updating Excel on rollback: {e}")
 
         return sale
 
-    def clear_all_data(self):
+    def clear_all_data(self) -> Optional[str]:
+        """Clear all auction data and reset. Creates backup first.
+
+        Returns:
+            Path to backup file if created successfully, None otherwise
+        """
+        # Create backup before destructive operation
+        backup_path = None
+        try:
+            backup_path = self._create_backup()
+            logger.info(f"Created backup before clear: {backup_path}")
+        except Exception as e:
+            logger.warning(f"Failed to create backup before clear: {e}")
+
         self._reset_state()
         self.db.full_reset()
 
@@ -1214,6 +1298,8 @@ class AuctionManager:
             )
         except Exception as e:
             logger.error(f"Error reinitializing Excel: {e}")
+
+        return backup_path
 
     # ==================== DISPLAY HELPERS ====================
 

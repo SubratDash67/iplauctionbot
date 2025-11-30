@@ -19,8 +19,8 @@ class Database:
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection with row factory"""
-        conn = sqlite3.connect(self.db_path)
+        """Get a database connection with row factory and timeout"""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -42,6 +42,9 @@ class Database:
         with self._transaction() as conn:
             cursor = conn.cursor()
 
+            # Enable WAL mode for better concurrency
+            cursor.execute("PRAGMA journal_mode=WAL")
+
             # Teams table
             cursor.execute(
                 """
@@ -61,11 +64,35 @@ class Database:
                     team_code TEXT NOT NULL,
                     player_name TEXT NOT NULL,
                     price INTEGER NOT NULL,
+                    acquisition_type TEXT DEFAULT 'bought',
+                    source_team TEXT,
                     bought_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (team_code) REFERENCES teams(team_code)
+                    FOREIGN KEY (team_code) REFERENCES teams(team_code),
+                    UNIQUE(team_code, player_name COLLATE NOCASE)
                 )
             """
             )
+
+            # Migration: Add acquisition_type and source_team columns if they don't exist
+            try:
+                cursor.execute(
+                    "ALTER TABLE team_squads ADD COLUMN acquisition_type TEXT DEFAULT 'bought'"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+            try:
+                cursor.execute("ALTER TABLE team_squads ADD COLUMN source_team TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+            # Global unique constraint: player can only be in ONE team across all teams
+            try:
+                cursor.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_global_unique_player ON team_squads(player_name COLLATE NOCASE)"
+                )
+            except sqlite3.OperationalError:
+                pass  # Index already exists
 
             # Player lists
             cursor.execute(
@@ -250,21 +277,38 @@ class Database:
 
     # ==================== TEAM SQUAD OPERATIONS ====================
 
-    def add_to_squad(self, team_code: str, player_name: str, price: int) -> bool:
-        """Add a player to team's squad. Returns False if player already exists."""
+    def add_to_squad(
+        self,
+        team_code: str,
+        player_name: str,
+        price: int,
+        acquisition_type: str = "bought",
+        source_team: str = None,
+    ) -> bool:
+        """Add a player to team's squad. Returns False if player already exists.
+
+        Args:
+            team_code: Team to add player to
+            player_name: Player name
+            price: Price paid
+            acquisition_type: 'retained', 'bought', or 'traded'
+            source_team: For trades, the team traded from
+        """
         with self._transaction() as conn:
             cursor = conn.cursor()
-            # Check if player already exists in this team's squad
+            # Check if player already exists in ANY team's squad (prevent duplicates globally)
             cursor.execute(
-                "SELECT id FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
-                (team_code, player_name),
+                "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
             )
-            if cursor.fetchone():
-                return False  # Player already in squad
+            existing = cursor.fetchone()
+            if existing:
+                return False  # Player already in a squad
 
             cursor.execute(
-                "INSERT INTO team_squads (team_code, player_name, price) VALUES (?, ?, ?)",
-                (team_code, player_name, price),
+                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
+                   VALUES (?, ?, ?, ?, ?)""",
+                (team_code, player_name, price, acquisition_type, source_team),
             )
             return True
 
@@ -278,8 +322,30 @@ class Database:
             )
             return cursor.rowcount > 0
 
-    def get_team_squad(self, team_code: str) -> List[Tuple[str, int]]:
-        """Get all players in a team's squad"""
+    def get_team_squad(self, team_code: str) -> List[Tuple[str, int, str, str]]:
+        """Get all players in a team's squad with acquisition info.
+        Returns: List of (player_name, price, acquisition_type, source_team)"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT player_name, price, 
+                          COALESCE(acquisition_type, 'bought') as acquisition_type,
+                          source_team 
+                   FROM team_squads WHERE team_code = ? ORDER BY bought_at""",
+                (team_code,),
+            )
+            return [
+                (
+                    row["player_name"],
+                    row["price"],
+                    row["acquisition_type"],
+                    row["source_team"],
+                )
+                for row in cursor.fetchall()
+            ]
+
+    def get_team_squad_simple(self, team_code: str) -> List[Tuple[str, int]]:
+        """Get all players in a team's squad (simple format for backwards compatibility)."""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -289,7 +355,19 @@ class Database:
             return [(row["player_name"], row["price"]) for row in cursor.fetchall()]
 
     def get_all_squads(self) -> Dict[str, List[Tuple[str, int]]]:
-        """Get all team squads"""
+        """Get all team squads (simple format)"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT team_code FROM teams")
+            teams = [row["team_code"] for row in cursor.fetchall()]
+
+            squads = {}
+            for team in teams:
+                squads[team] = self.get_team_squad_simple(team)
+            return squads
+
+    def get_all_squads_detailed(self) -> Dict[str, List[Tuple[str, int, str, str]]]:
+        """Get all team squads with acquisition details"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT team_code FROM teams")
@@ -815,9 +893,13 @@ class Database:
                 (sale["final_price"], sale["team_code"]),
             )
 
-            # Remove from squad
+            # Remove from squad using subquery (standard SQL)
             cursor.execute(
-                "DELETE FROM team_squads WHERE team_code = ? AND player_name = ? ORDER BY bought_at DESC LIMIT 1",
+                """DELETE FROM team_squads WHERE id = (
+                    SELECT id FROM team_squads 
+                    WHERE team_code = ? AND LOWER(player_name) = LOWER(?)
+                    ORDER BY bought_at DESC LIMIT 1
+                )""",
                 (sale["team_code"], sale["player_name"]),
             )
 
@@ -955,20 +1037,21 @@ class Database:
                 (price, to_team),
             )
 
-            # Add to target team
+            # Add to target team with trade info
             cursor.execute(
-                "INSERT INTO team_squads (team_code, player_name, price) VALUES (?, ?, ?)",
-                (to_team, actual_player_name, price),
+                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
+                   VALUES (?, ?, ?, 'traded', ?)""",
+                (to_team, actual_player_name, price, from_team),
             )
 
             # Remove original sale record (if exists) to avoid duplicates
             cursor.execute(
-                "DELETE FROM sales WHERE LOWER(player_name) = LOWER(?)",
-                (actual_player_name,),
+                "DELETE FROM sales WHERE LOWER(player_name) = LOWER(?) OR LOWER(player_name) LIKE LOWER(?)",
+                (actual_player_name, f"{actual_player_name} (TRADE%"),
             )
 
             # Record the trade in sales table (so it appears in Auction Results)
-            # No bids for trades - just a direct transfer, so we omit total_bids (defaults to 0)
+            # Mark as TRADE type so it's excluded from most expensive stats
             cursor.execute(
                 """
                 INSERT INTO sales (player_name, team_code, final_price)
@@ -984,9 +1067,13 @@ class Database:
         with self._transaction() as conn:
             cursor = conn.cursor()
 
-            # Most expensive player
+            # Most expensive player - EXCLUDE trades and releases
             cursor.execute(
-                "SELECT player_name, final_price FROM sales ORDER BY final_price DESC LIMIT 1"
+                """SELECT player_name, final_price FROM sales 
+                   WHERE player_name NOT LIKE '%(TRADE%' 
+                   AND player_name NOT LIKE '%(RELEASED%'
+                   AND team_code != 'UNSOLD'
+                   ORDER BY final_price DESC LIMIT 1"""
             )
             most_expensive = cursor.fetchone()
 
@@ -1106,6 +1193,27 @@ class Database:
 
             return result
 
+    def get_released_players_for_excel(self) -> List[Tuple[str, str, Optional[int]]]:
+        """Get released players formatted for Excel export.
+        Returns list of (player_name, released_from_team, price)
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # Get from sales table (recorded as RELEASED)
+            cursor.execute(
+                """
+                SELECT player_name, final_price
+                FROM sales 
+                WHERE team_code = 'RELEASED'
+                ORDER BY sold_at
+                """
+            )
+            return [
+                (row["player_name"], "N/A", row["final_price"])
+                for row in cursor.fetchall()
+            ]
+
     def get_team_bid_history(self, team_code: str, limit: int = 50) -> List[dict]:
         """Get bid history for a specific team with player names.
         Returns list of bid records."""
@@ -1147,3 +1255,126 @@ class Database:
         self.clear_all_auto_bids()
         self.clear_user_teams()
         self.clear_sales()
+
+    def remove_duplicate_players(self):
+        """Remove duplicate players from squads, keeping only the first entry"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            # Find and remove duplicates, keeping the earliest entry
+            cursor.execute(
+                """
+                DELETE FROM team_squads 
+                WHERE id NOT IN (
+                    SELECT MIN(id) FROM team_squads 
+                    GROUP BY LOWER(player_name)
+                )
+            """
+            )
+            removed = cursor.rowcount
+            return removed
+
+    def move_player_to_set(self, player_name: str, target_set: str) -> bool:
+        """Move a player from one set to another"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            # Check if player exists
+            cursor.execute(
+                "SELECT id FROM player_lists WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
+            )
+            if not cursor.fetchone():
+                return False
+
+            # Create target set if doesn't exist
+            cursor.execute(
+                "INSERT OR IGNORE INTO list_order (position, list_name) VALUES ((SELECT COALESCE(MAX(position), 0) + 1 FROM list_order), ?)",
+                (target_set.lower(),),
+            )
+
+            # Move player
+            cursor.execute(
+                "UPDATE player_lists SET list_name = ? WHERE LOWER(player_name) = LOWER(?)",
+                (target_set.lower(), player_name),
+            )
+            return cursor.rowcount > 0
+
+    # ==================== ATOMIC SALE OPERATIONS ====================
+
+    def finalize_sale_atomic(
+        self, player_name: str, team_code: str, amount: int, bid_count: int
+    ) -> Tuple[bool, str]:
+        """Atomically finalize a sale - all operations in single transaction.
+
+        This ensures data integrity by performing all sale operations atomically:
+        1. Verify player not already sold (double-sell prevention)
+        2. Deduct purse from winning team
+        3. Add player to team's squad
+        4. Record the sale
+
+        Returns:
+            Tuple of (success: bool, error_message: str)
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # 1. Check if player is already in any squad (double-sell prevention)
+            cursor.execute(
+                "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
+            )
+            existing = cursor.fetchone()
+            if existing:
+                return False, f"Player already sold to {existing['team_code']}"
+
+            # 2. Deduct from purse (atomic check-and-deduct)
+            cursor.execute(
+                "UPDATE teams SET purse = purse - ? WHERE team_code = ? AND purse >= ?",
+                (amount, team_code, amount),
+            )
+            if cursor.rowcount == 0:
+                return False, "Insufficient purse"
+
+            # 3. Add to squad
+            try:
+                cursor.execute(
+                    """INSERT INTO team_squads (team_code, player_name, price, acquisition_type) 
+                       VALUES (?, ?, ?, 'bought')""",
+                    (team_code, player_name, amount),
+                )
+            except sqlite3.IntegrityError:
+                return False, "Player already exists in a squad"
+
+            # 4. Record sale
+            cursor.execute(
+                """INSERT INTO sales (player_name, team_code, final_price, total_bids)
+                   VALUES (?, ?, ?, ?)""",
+                (player_name, team_code, amount, bid_count),
+            )
+
+            return True, "Sale completed successfully"
+
+    def record_unsold_atomic(self, player_name: str, base_price: int) -> bool:
+        """Atomically record a player as unsold.
+
+        Returns:
+            bool: True if recorded successfully
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # Check player not already sold
+            cursor.execute(
+                "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
+            )
+            if cursor.fetchone():
+                return False  # Player was sold, don't mark as unsold
+
+            # Record as unsold
+            cursor.execute(
+                """INSERT INTO sales (player_name, team_code, final_price, total_bids)
+                   VALUES (?, 'UNSOLD', ?, 0)""",
+                (player_name, base_price),
+            )
+
+            return True

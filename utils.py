@@ -4,11 +4,30 @@ Contains helper functions for formatting, file operations, etc.
 """
 
 import csv
+import logging
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 import os
+
+# Set up module-level logger
+logger = logging.getLogger(__name__)
+
+
+def sanitize_csv_value(value: str) -> str:
+    """Sanitize CSV values to prevent formula injection attacks.
+
+    Excel/Sheets can execute formulas starting with =, +, -, @, tab, or carriage return.
+    This function prefixes such values with a single quote to prevent execution.
+    """
+    if not value:
+        return value
+
+    dangerous_chars = ("=", "+", "-", "@", "\t", "\r")
+    if value.startswith(dangerous_chars):
+        return f"'{value}"
+    return value
 
 
 # -----------------------------------------------------------
@@ -39,6 +58,47 @@ def format_amount(num: Optional[int]) -> str:
         s = f"{val:.2f}".rstrip("0").rstrip(".")
         return f"{s}L"
     return f"{n:,}"
+
+
+def _save_workbook_with_retry(
+    wb, filepath: str, max_retries: int = 3, delay: float = 0.5
+) -> None:
+    """Save workbook with retry logic for file lock issues.
+
+    Args:
+        wb: openpyxl Workbook object
+        filepath: Path to save to
+        max_retries: Maximum number of retry attempts
+        delay: Delay between retries in seconds
+
+    Raises:
+        PermissionError: If file is locked after all retries
+        Exception: For other save errors
+    """
+    import time as time_module
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            wb.save(filepath)
+            return
+        except PermissionError as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                logger.warning(
+                    f"Excel file locked, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})"
+                )
+                time_module.sleep(delay)
+            continue
+        except Exception as e:
+            raise e
+
+    logger.error(
+        f"Failed to save Excel file after {max_retries} attempts: {last_error}"
+    )
+    raise PermissionError(
+        f"Excel file '{filepath}' is locked by another process. Please close it and try again."
+    )
 
 
 class FileManager:
@@ -136,8 +196,16 @@ class FileManager:
                             players.append((name, price))
             return players
         except FileNotFoundError:
+            logger.error(f"CSV file not found: {filepath}")
             raise FileNotFoundError(f"CSV file not found: {filepath}")
+        except csv.Error as e:
+            logger.error(f"CSV parsing error in {filepath}: {e}")
+            raise ValueError(f"Error parsing CSV file: {str(e)}")
+        except UnicodeDecodeError as e:
+            logger.error(f"Encoding error in {filepath}: {e}")
+            raise ValueError(f"File encoding error. Please use UTF-8: {str(e)}")
         except Exception as e:
+            logger.error(f"Unexpected error reading CSV {filepath}: {e}")
             raise Exception(f"Error reading CSV file: {str(e)}")
 
     @staticmethod
@@ -242,7 +310,8 @@ class FileManager:
                         if player_name.lower() in retained_names
                         else "Bought"
                     )
-                    ts.append([player_name, format_amount(price), player_type])
+                    safe_player = sanitize_csv_value(player_name)
+                    ts.append([safe_player, format_amount(price), player_type])
                     total_spent += price
 
                 # Summary rows
@@ -307,7 +376,9 @@ class FileManager:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             # Format price as cr/L for readability
             formatted_price = format_amount(price)
-            sheet.append([player, team, formatted_price, timestamp])
+            # Sanitize player name to prevent formula injection
+            safe_player = sanitize_csv_value(player)
+            sheet.append([safe_player, team, formatted_price, timestamp])
             wb.save(filepath)
         except Exception as e:
             raise Exception(f"Error saving to Excel: {str(e)}")
@@ -388,9 +459,10 @@ class FileManager:
                 cell.alignment = Alignment(horizontal="center")
 
             for player_name, set_name, base_price in unsold_players:
+                safe_player = sanitize_csv_value(player_name)
                 us.append(
                     [
-                        player_name,
+                        safe_player,
                         set_name.upper() if set_name else "N/A",
                         format_amount(base_price) if base_price else "N/A",
                     ]
@@ -399,6 +471,53 @@ class FileManager:
             wb.save(filepath)
         except Exception as e:
             raise Exception(f"Error updating unsold players sheet: {str(e)}")
+
+    @staticmethod
+    def update_released_players_sheet(
+        filepath: str,
+        released_players: List[Tuple[str, str, Optional[int]]],
+    ) -> None:
+        """Update the released players sheet
+
+        Args:
+            filepath: Path to Excel file
+            released_players: List of (player_name, released_from, price)
+        """
+        try:
+            if not os.path.exists(filepath):
+                FileManager.initialize_excel(filepath)
+            wb = openpyxl.load_workbook(filepath)
+
+            # Remove existing sheet if present
+            if "Released Players" in wb.sheetnames:
+                del wb["Released Players"]
+
+            # Create at position 3 (after Team Summary and Unsold Players)
+            rp = wb.create_sheet("Released Players", 3)
+            rp.append(["Player", "Released Info", "Price"])
+
+            header_fill = PatternFill(
+                start_color="C00000", end_color="C00000", fill_type="solid"
+            )
+            header_font = Font(bold=True, color="FFFFFF")
+            for cell in rp[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center")
+
+            for player_name, info, price in released_players:
+                safe_player = sanitize_csv_value(player_name)
+                rp.append(
+                    [
+                        safe_player,
+                        info if info else "N/A",
+                        format_amount(price) if price else "N/A",
+                    ]
+                )
+
+            wb.save(filepath)
+        except Exception as e:
+            raise Exception(f"Error updating released players sheet: {str(e)}")
 
     @staticmethod
     def update_individual_team_sheets(
@@ -470,7 +589,8 @@ class FileManager:
                         if player_name.lower() in retained_names
                         else "Bought"
                     )
-                    ts.append([player_name, format_amount(price), player_type])
+                    safe_player = sanitize_csv_value(player_name)
+                    ts.append([safe_player, format_amount(price), player_type])
                     total_spent += price
 
                 # Add summary rows
@@ -504,6 +624,7 @@ class FileManager:
         teams: Dict[str, int],
         team_squads: Dict[str, List[Tuple[str, int]]],
         unsold_players: List[Tuple[str, str, Optional[int]]] = None,
+        released_players: List[Tuple[str, str, Optional[int]]] = None,
     ) -> None:
         """Regenerate the entire Excel file from database records.
 
@@ -515,6 +636,7 @@ class FileManager:
             teams: Team purses
             team_squads: All squad data
             unsold_players: List of (player_name, set_name, base_price) for unsold players
+            released_players: List of (player_name, released_from, price) for released players
         """
         try:
             # Initialize fresh Excel file with all sheets
@@ -523,27 +645,29 @@ class FileManager:
             wb = openpyxl.load_workbook(filepath)
             sheet = wb["Auction Results"]
 
-            # Add all sales from DB (including UNSOLD)
+            # Add all sales from DB (excluding UNSOLD and RELEASED - they go in separate sheets)
             if sales:
                 for sale in sales:
                     team_code = sale.get("team_code", "Unknown")
-                    # Skip UNSOLD entries - they go in separate sheet
-                    if team_code == "UNSOLD":
+                    # Skip UNSOLD and RELEASED entries - they go in separate sheets
+                    if team_code in ("UNSOLD", "RELEASED"):
                         continue
                     formatted_price = format_amount(sale.get("final_price", 0))
                     timestamp = sale.get(
                         "sold_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     )
+                    # Sanitize player name to prevent formula injection
+                    safe_player = sanitize_csv_value(sale.get("player_name", "Unknown"))
                     sheet.append(
                         [
-                            sale.get("player_name", "Unknown"),
+                            safe_player,
                             team_code,
                             formatted_price,
                             timestamp,
                         ]
                     )
 
-            wb.save(filepath)
+            _save_workbook_with_retry(wb, filepath)
 
             # Update Team Summary
             FileManager.update_team_summary(filepath, teams, team_squads)
@@ -551,6 +675,10 @@ class FileManager:
             # Update Unsold Players sheet
             if unsold_players:
                 FileManager.update_unsold_players_sheet(filepath, unsold_players)
+
+            # Update Released Players sheet
+            if released_players:
+                FileManager.update_released_players_sheet(filepath, released_players)
 
             # Update Individual Team Sheets
             FileManager.update_individual_team_sheets(filepath, teams, team_squads)
@@ -640,6 +768,49 @@ class MessageFormatter:
     @staticmethod
     def format_countdown(seconds: int) -> str:
         return f"**{seconds}** seconds remaining..."
+
+    @staticmethod
+    def format_squad_display(
+        team_code: str,
+        squad: List[Tuple[str, int, str, str]],
+        purse: int,
+        overseas_slots: int,
+        total_slots: int,
+    ) -> str:
+        """Format a team's squad for display.
+
+        Args:
+            team_code: The team code (e.g., 'MI', 'CSK')
+            squad: List of (player, price, acq_type, source) tuples
+            purse: Remaining purse amount
+            overseas_slots: Number of overseas slots
+            total_slots: Total slots available
+
+        Returns:
+            Formatted string for Discord display
+        """
+        current_players = len(squad)
+        total_spent = sum(price for _, price, _, _ in squad) if squad else 0
+
+        msg = f"**{team_code} Squad:**\n```\n"
+        if squad:
+            for player, price, acq_type, source in squad:
+                type_str = ""
+                if acq_type == "traded" and source:
+                    type_str = f" [Traded from {source}]"
+                elif acq_type == "retained":
+                    type_str = " [Retained]"
+                msg += f"{player:25} : {format_amount(price)}{type_str}\n"
+        else:
+            msg += "No players yet.\n"
+        msg += f"\n{'='*50}\n"
+        msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
+        msg += f"{'Remaining Purse':30} : {format_amount(purse)}\n"
+        msg += f"{'Players':30} : {current_players}\n"
+        msg += f"{'Overseas Slots':30} : {overseas_slots}\n"
+        msg += f"{'Total Slots Available':30} : {total_slots}\n"
+        msg += "```"
+        return msg
 
 
 def validate_team_name(team: str, teams: Dict[str, int]) -> Optional[str]:

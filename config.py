@@ -7,19 +7,25 @@ import os
 # Bot token is loaded from environment variable DISCORD_TOKEN (put it in .env)
 BOT_TOKEN = os.getenv("DISCORD_TOKEN", "")
 
-# Auction Settings
-DEFAULT_COUNTDOWN = 120  # seconds - initial timer when bidding starts (2 mins)
-NO_BID_TIMEOUT = 90  # seconds - after first bid, wait 90s for next bid before selling
-NO_START_TIMEOUT = 60  # seconds - if NO bid at all, player goes unsold after 60s
-PLAYER_GAP = 20  # seconds gap between players
-LIST_GAP = 20  # seconds gap between lists
-MANUAL_SELL_COOLDOWN = 15  # seconds - minimum time before admin can /soldto
-GOING_ONCE_TIME = 15  # seconds remaining when "Going Once" is shown
-GOING_TWICE_TIME = 10  # seconds remaining when "Going Twice" is shown
-GOING_THRICE_TIME = 5  # seconds remaining when "Going Thrice" is shown
-BIDDING_OPEN_WARNING_TIME = 15  # seconds - show bidding open text after this if no bid
+# Auction Settings - Timing Configuration
+# =========================================
+DEFAULT_COUNTDOWN = 120  # Initial timer when bidding starts (2 minutes)
+NO_BID_TIMEOUT = 15  # After first bid, sell after this many seconds of no new bids
+NO_START_TIMEOUT = 60  # If NO bids at all, player goes unsold after this time
+PLAYER_GAP = 5  # Seconds between players (adjustable via /setplayergap)
+LIST_GAP = 5  # Seconds between sets/lists
+RESUME_DELAY = 5  # Delay after auction started/resumed message
+
+# Countdown Warning Thresholds (for "Going Once/Twice/Thrice")
+MANUAL_SELL_COOLDOWN = 15  # Min time before admin can use /soldto
+GOING_ONCE_TIME = 15  # Seconds remaining when "Going Once" shows
+GOING_TWICE_TIME = 10  # Seconds remaining when "Going Twice" shows
+GOING_THRICE_TIME = 5  # Seconds remaining when "Going Thrice" shows
+BIDDING_OPEN_WARNING_TIME = 15  # Show "bidding open" after this if no bids
+
+# Default Values
 DEFAULT_BASE_PRICE = 2000000  # 20 Lakh base price
-DEFAULT_PURSE = 1250000000  # 125 Crore per team (to accommodate all retained players)
+DEFAULT_PURSE = 1250000000  # 125 Crore per team (for retained player calculations)
 
 # Auction Data File Path (Excel)
 DEFAULT_AUCTION_FILE = "Auction_list.xlsx"

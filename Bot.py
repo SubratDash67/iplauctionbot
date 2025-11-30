@@ -34,14 +34,15 @@ from config import (
     PLAYER_GAP,
     LIST_GAP,
     DEFAULT_COUNTDOWN,
+    RESUME_DELAY,
 )
 from auction_manager import AuctionManager
 from utils import MessageFormatter, validate_team_name, format_amount
 
 TOKEN = BOT_TOKEN or os.getenv("DISCORD_TOKEN", "")
 
-# 15s delay for new sets (after the first one)
-INITIAL_SET_DELAY = 15
+# 5s delay for new sets (after the first one)
+INITIAL_SET_DELAY = 5
 
 
 class AuctionBot(commands.Bot):
@@ -61,7 +62,20 @@ class AuctionBot(commands.Bot):
         self.countdown_channel: Optional[discord.TextChannel] = None
         self.countdown_task: Optional[asyncio.Task] = None
 
+        # Dynamic player gap (can be changed at runtime) - instance variable
+        self.player_gap = PLAYER_GAP
+
         self.user_teams: Dict[int, str] = {}
+
+    async def cancel_countdown_task(self):
+        """Safely cancel the countdown task with proper cleanup"""
+        if self.countdown_task and not self.countdown_task.done():
+            self.countdown_task.cancel()
+            try:
+                await self.countdown_task
+            except asyncio.CancelledError:
+                pass
+            self.countdown_task = None
 
     async def setup_hook(self):
         logger.info("Syncing slash commands globally...")
@@ -274,6 +288,7 @@ async def my_team(interaction: discord.Interaction):
 @bot.tree.command(
     name="bid", description="Place a bid for your team (auto-calculates amount)"
 )
+@app_commands.checks.cooldown(1, 2.0, key=lambda i: i.user.id)
 async def bid(interaction: discord.Interaction):
     user_id = interaction.user.id
 
@@ -353,7 +368,7 @@ async def bid(interaction: discord.Interaction):
 @bot.tree.command(name="undobid", description="Undo the last bid (Admin only)")
 @app_commands.checks.has_permissions(administrator=True)
 async def undo_bid(interaction: discord.Interaction):
-    success, msg = bot.auction_manager.undo_last_bid()
+    success, msg = await bot.auction_manager.undo_last_bid()
     await interaction.response.send_message(msg)
     if success:
         # Update live stats
@@ -405,7 +420,8 @@ async def team_squad(interaction: discord.Interaction):
         )
         return
 
-    squads = bot.auction_manager.team_squads
+    # Get detailed squad with acquisition info
+    detailed_squads = bot.auction_manager.db.get_all_squads_detailed()
     teams_purse = bot.auction_manager.teams
 
     # Get slot info
@@ -413,25 +429,12 @@ async def team_squad(interaction: discord.Interaction):
     overseas_slots = slots["overseas"]
     total_slots = slots["total"]
 
-    squad = squads.get(team_upper, [])
-    current_players = len(squad)
-    total_spent = sum(price for _, price in squad) if squad else 0
+    squad = detailed_squads.get(team_upper, [])
     purse = teams_purse.get(team_upper, 0)
 
-    msg = f"**{team_upper} Squad:**\n```\n"
-    if squad:
-        for player, price in squad:
-            msg += f"{player:30} : {format_amount(price)}\n"
-    else:
-        msg += "No players yet.\n"
-    msg += f"\n{'='*50}\n"
-    msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
-    msg += f"{'Remaining Purse':30} : {format_amount(purse)}\n"
-    msg += f"{'Players':30} : {current_players}\n"
-    msg += f"{'Overseas Slots':30} : {overseas_slots}\n"
-    msg += f"{'Total Slots Available':30} : {total_slots}\n"
-    msg += "```"
-
+    msg = bot.formatter.format_squad_display(
+        team_upper, squad, purse, overseas_slots, total_slots
+    )
     await interaction.response.send_message(msg)
 
 
@@ -447,7 +450,8 @@ async def view_squad(interaction: discord.Interaction, team: str):
         await interaction.response.send_message(f"Invalid team: {team}", ephemeral=True)
         return
 
-    squads = bot.auction_manager.team_squads
+    # Get detailed squad with acquisition info
+    detailed_squads = bot.auction_manager.db.get_all_squads_detailed()
     teams_purse = bot.auction_manager.teams
 
     # Get slot info
@@ -455,25 +459,12 @@ async def view_squad(interaction: discord.Interaction, team: str):
     overseas_slots = slots["overseas"]
     total_slots = slots["total"]
 
-    squad = squads.get(team_upper, [])
-    current_players = len(squad)
-    total_spent = sum(price for _, price in squad) if squad else 0
+    squad = detailed_squads.get(team_upper, [])
     purse = teams_purse.get(team_upper, 0)
 
-    msg = f"**{team_upper} Squad:**\n```\n"
-    if squad:
-        for player, price in squad:
-            msg += f"{player:30} : {format_amount(price)}\n"
-    else:
-        msg += "No players yet.\n"
-    msg += f"\n{'='*50}\n"
-    msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
-    msg += f"{'Remaining Purse':30} : {format_amount(purse)}\n"
-    msg += f"{'Players':30} : {current_players}\n"
-    msg += f"{'Overseas Slots':30} : {overseas_slots}\n"
-    msg += f"{'Total Slots Available':30} : {total_slots}\n"
-    msg += "```"
-
+    msg = bot.formatter.format_squad_display(
+        team_upper, squad, purse, overseas_slots, total_slots
+    )
     await interaction.response.send_message(msg)
 
 
@@ -621,16 +612,34 @@ async def sold_to(interaction: discord.Interaction, team: str):
 
     player_name = bot.auction_manager.current_player
 
-    # Cancel the countdown task
-    if bot.countdown_task and not bot.countdown_task.done():
-        bot.countdown_task.cancel()
-        bot.countdown_task = None
+    # Cancel the countdown task safely
+    await bot.cancel_countdown_task()
 
-    if bot.auction_manager.current_bid > 0:
-        bot.auction_manager.highest_bidder = team_upper
-        bot.auction_manager._save_state_to_db()
+    # Record a manual bid for audit trail if no bid exists or if overriding
+    import time
 
-    success, winning_team, amount = bot.auction_manager.finalize_sale()
+    bid_amount = (
+        bot.auction_manager.current_bid
+        if bot.auction_manager.current_bid > 0
+        else (bot.auction_manager.base_price or 0)
+    )
+    bot.auction_manager.db.record_bid(
+        player_name=player_name,
+        team_code=team_upper,
+        user_id=interaction.user.id,
+        user_name=f"ADMIN:{interaction.user.name}",
+        amount=bid_amount,
+        timestamp=time.time(),
+        is_auto_bid=False,
+    )
+
+    # Update in-memory state
+    bot.auction_manager.highest_bidder = team_upper
+    if bot.auction_manager.current_bid == 0:
+        bot.auction_manager.current_bid = bid_amount
+    bot.auction_manager._save_state_to_db()
+
+    success, winning_team, amount = await bot.auction_manager.finalize_sale()
 
     if success:
         sold_msg = bot.formatter.format_sold_message(player_name, winning_team, amount)
@@ -661,13 +670,11 @@ async def mark_unsold(interaction: discord.Interaction):
 
     player = bot.auction_manager.current_player
 
-    # Cancel the countdown task to prevent warnings
-    if bot.countdown_task and not bot.countdown_task.done():
-        bot.countdown_task.cancel()
-        bot.countdown_task = None
+    # Cancel the countdown task safely
+    await bot.cancel_countdown_task()
 
     # Finalize as unsold
-    success, team, amount = bot.auction_manager.finalize_sale()
+    success, team, amount = await bot.auction_manager.finalize_sale()
 
     if success:
         sold_msg = bot.formatter.format_sold_message(player, "UNSOLD", amount)
@@ -1008,11 +1015,20 @@ class ShowListsView(discord.ui.View):
     """Paginated view for /showlists with next/previous buttons"""
 
     def __init__(self, pages: list, user_id: int):
-        super().__init__(timeout=300)  # 5 minute timeout
+        super().__init__(
+            timeout=120
+        )  # 2 minute timeout (reduced from 5 to prevent memory buildup)
         self.pages = pages
         self.current_page = 0
         self.user_id = user_id
         self.update_buttons()
+
+    async def on_timeout(self):
+        """Disable buttons when view times out to prevent memory leak"""
+        for item in self.children:
+            item.disabled = True
+        # Clear references
+        self.pages = None
 
     def update_buttons(self):
         self.prev_button.disabled = self.current_page == 0
@@ -1190,9 +1206,7 @@ async def start_auction(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 async def stop_auction(interaction: discord.Interaction):
     if bot.auction_manager.stop_auction():
-        if bot.countdown_task:
-            bot.countdown_task.cancel()
-            bot.countdown_task = None
+        await bot.cancel_countdown_task()
         await interaction.response.send_message("**AUCTION STOPPED**")
     else:
         await interaction.response.send_message(
@@ -1311,13 +1325,11 @@ async def skip_player(interaction: discord.Interaction):
 
     player = bot.auction_manager.current_player
 
-    # Cancel the countdown task to prevent warnings
-    if bot.countdown_task and not bot.countdown_task.done():
-        bot.countdown_task.cancel()
-        bot.countdown_task = None
+    # Cancel the countdown task safely
+    await bot.cancel_countdown_task()
 
     # Finalize as unsold
-    success, team, amount = bot.auction_manager.finalize_sale()
+    success, team, amount = await bot.auction_manager.finalize_sale()
 
     if success:
         await interaction.response.send_message(f"Player **{player}** SKIPPED (unsold)")
@@ -1350,9 +1362,7 @@ async def skip_set(interaction: discord.Interaction):
     # Mark all unauctioned players in current set as auctioned (unsold)
     skipped_count = bot.auction_manager.skip_current_set()
 
-    if bot.countdown_task:
-        bot.countdown_task.cancel()
-        bot.countdown_task = None
+    await bot.cancel_countdown_task()
 
     await interaction.response.send_message(
         f"⏭️ **Skipped set {current_set.upper()}!**\n"
@@ -1475,14 +1485,72 @@ async def reset_purses(interaction: discord.Interaction):
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def clear_auction(interaction: discord.Interaction):
-    bot.auction_manager.clear_all_data()
+    # Remove duplicates first
+    duplicates_removed = bot.auction_manager.db.remove_duplicate_players()
+
+    backup_path = bot.auction_manager.clear_all_data()
     bot.user_teams.clear()
-    if bot.countdown_task:
-        bot.countdown_task.cancel()
-        bot.countdown_task = None
+    await bot.cancel_countdown_task()
+
+    msg = "**All auction data has been cleared and reset.**"
+    if backup_path:
+        msg += f"\n💾 Backup created: `{backup_path}`"
+    if duplicates_removed > 0:
+        msg += f"\n🔧 Removed {duplicates_removed} duplicate player entries."
+    await interaction.response.send_message(msg)
+
+
+@bot.tree.command(
+    name="setplayergap", description="Set gap between players in seconds (Admin only)"
+)
+@app_commands.describe(seconds="Gap in seconds between players (1-60)")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_player_gap(interaction: discord.Interaction, seconds: int):
+    if seconds < 1 or seconds > 60:
+        await interaction.response.send_message(
+            "Gap must be between 1 and 60 seconds.", ephemeral=True
+        )
+        return
+    bot.player_gap = seconds
     await interaction.response.send_message(
-        "**All auction data has been cleared and reset.**"
+        f"✅ Player gap set to **{seconds} seconds**"
     )
+
+
+@bot.tree.command(
+    name="moveplayer", description="Move a player from one set to another (Admin only)"
+)
+@app_commands.describe(
+    player="Player name to move", target_set="Target set name (e.g., BA1, M1)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def move_player(interaction: discord.Interaction, player: str, target_set: str):
+    success = bot.auction_manager.db.move_player_to_set(player, target_set)
+    if success:
+        await interaction.response.send_message(
+            f"✅ Moved **{player}** to set **{target_set.upper()}**"
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ Could not find player **{player}** in any set.", ephemeral=True
+        )
+
+
+@bot.tree.command(
+    name="fixduplicates",
+    description="Remove duplicate players from squads (Admin only)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def fix_duplicates(interaction: discord.Interaction):
+    removed = bot.auction_manager.db.remove_duplicate_players()
+    if removed > 0:
+        await interaction.response.send_message(
+            f"✅ Removed **{removed}** duplicate player entries from squads."
+        )
+    else:
+        await interaction.response.send_message(
+            "✅ No duplicate players found.", ephemeral=True
+        )
 
 
 # ============================================================
@@ -1622,9 +1690,15 @@ async def admin_help_command(interaction: discord.Interaction):
         name="Settings & Communication",
         value=(
             "`/setcountdown secs` - Timer duration\n"
+            "`/setplayergap secs` - Gap between players\n"
             "`/setstatschannel #ch` - Stats channel\n"
             "`/announce title msg` - Announcement"
         ),
+        inline=False,
+    )
+    embed3.add_field(
+        name="Player Movement",
+        value=("`/moveplayer player from_set to_set` - Move player between sets"),
         inline=False,
     )
 
@@ -1645,7 +1719,7 @@ async def start_next_player(channel: discord.TextChannel):
     if bot.auction_manager.paused:
         return
 
-    await asyncio.sleep(PLAYER_GAP)
+    await asyncio.sleep(bot.player_gap)
 
     # Check again after sleep
     if bot.auction_manager.paused:
@@ -1691,23 +1765,23 @@ async def start_next_player(channel: discord.TextChannel):
         await channel.send(embed=set_embed)
         await asyncio.sleep(2)
 
-        msg = bot.formatter.format_player_announcement(player_name, base_price)
-        await channel.send(msg)
-
         # Determine delay based on auction phase
         # If list index is 0, it's the first set (Start of Auction)
         if bot.auction_manager.current_list_index == 0:
             delay = 5
+            # Send auction starting message BEFORE player announcement
             await channel.send(
                 f"🚨 Auction starting! First bid window opens in **{delay} seconds**."
             )
         else:
             delay = INITIAL_SET_DELAY
-            await channel.send(
-                f"🚨 **{player_name}** is the first player of **{current_set_name.upper()}**. Bidding opens in **{delay} seconds**."
-            )
+            await channel.send(f"🚨 Bidding opens in **{delay} seconds**.")
 
         await asyncio.sleep(delay)
+
+        # Now announce the player
+        msg = bot.formatter.format_player_announcement(player_name, base_price)
+        await channel.send(msg)
 
         bot.auction_manager.reset_last_bid_time()
         # Don't send "BIDDING OPEN" immediately - will be sent after 15s if no bid
@@ -1812,7 +1886,7 @@ async def countdown_loop(channel: discord.TextChannel):
                     return
 
                 # Finalize the unsold sale
-                success, team, amount = bot.auction_manager.finalize_sale()
+                success, team, amount = await bot.auction_manager.finalize_sale()
 
                 if success and team == "UNSOLD":
                     sold_msg = bot.formatter.format_sold_message(
@@ -1829,29 +1903,29 @@ async def countdown_loop(channel: discord.TextChannel):
                 return
 
         else:
-            # First bid has been placed - use NO_BID_TIMEOUT (90 seconds) for subsequent bids
+            # First bid has been placed - use NO_BID_TIMEOUT (15 seconds) countdown after last bid
             elapsed_since_last_bid = now - bot.auction_manager.last_bid_time
             remaining = NO_BID_TIMEOUT - int(elapsed_since_last_bid)
 
             current_bid = bot.auction_manager.current_bid
             current_team = bot.auction_manager.highest_bidder
 
-            # Going once at 15s remaining
-            if remaining <= 15 and remaining > 10 and not going_once_sent:
+            # Going once at 12s remaining (3s after bid)
+            if remaining <= 12 and remaining > 8 and not going_once_sent:
                 going_once_sent = True
                 await channel.send(
                     f"🔔 **GOING ONCE!** {format_amount(current_bid)} to **{current_team}**!"
                 )
 
-            # Going twice at 10s remaining
-            if remaining <= 10 and remaining > 5 and not going_twice_sent:
+            # Going twice at 8s remaining (7s after bid)
+            if remaining <= 8 and remaining > 4 and not going_twice_sent:
                 going_twice_sent = True
                 await channel.send(
                     f"🔔🔔 **GOING TWICE!** {format_amount(current_bid)} to **{current_team}**!"
                 )
 
-            # Going thrice at 5s remaining
-            if remaining <= 5 and remaining > 0 and not going_thrice_sent:
+            # Going thrice at 4s remaining (11s after bid)
+            if remaining <= 4 and remaining > 0 and not going_thrice_sent:
                 going_thrice_sent = True
                 await channel.send(
                     f"🔔🔔🔔 **GOING THRICE!** Last chance! {format_amount(current_bid)} to **{current_team}**!"
@@ -1891,7 +1965,7 @@ async def countdown_loop(channel: discord.TextChannel):
                     asyncio.create_task(start_next_player(channel))
                     return
 
-                success, team, amount = bot.auction_manager.finalize_sale()
+                success, team, amount = await bot.auction_manager.finalize_sale()
 
                 if success and team and team != "UNSOLD":
                     # Player SOLD to a team
