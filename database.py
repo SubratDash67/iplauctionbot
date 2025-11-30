@@ -180,10 +180,19 @@ class Database:
                     current_bid INTEGER DEFAULT 0,
                     highest_bidder TEXT,
                     countdown_seconds INTEGER DEFAULT 15,
-                    extensions_used INTEGER DEFAULT 0
+                    extensions_used INTEGER DEFAULT 0,
+                    last_bid_time REAL DEFAULT 0
                 )
             """
             )
+
+            # Migration: Add last_bid_time column if it doesn't exist
+            try:
+                cursor.execute(
+                    "ALTER TABLE auction_state ADD COLUMN last_bid_time REAL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
             # Initialize auction state if not exists
             cursor.execute(
@@ -740,7 +749,8 @@ class Database:
                     base_price = 0,
                     current_bid = 0,
                     highest_bidder = NULL,
-                    extensions_used = 0
+                    extensions_used = 0,
+                    last_bid_time = 0
                 WHERE id = 1
             """
             )
