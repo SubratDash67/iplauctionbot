@@ -160,7 +160,7 @@ class FileManager:
                             if raw and (raw.replace(".", "", 1).isdigit()):
                                 try:
                                     price = int(float(raw))
-                                except:
+                                except (ValueError, TypeError):
                                     price = None
                         if name and not name.isdigit():
                             players.append((name, price))
@@ -188,7 +188,7 @@ class FileManager:
                                         if raw and (raw.replace(".", "", 1).isdigit()):
                                             try:
                                                 price = int(float(raw))
-                                            except:
+                                            except (ValueError, TypeError):
                                                 price = None
                                             break
                                 break

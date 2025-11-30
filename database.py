@@ -514,6 +514,27 @@ class Database:
                 lists[list_name].append((row["player_name"], row["base_price"]))
             return lists
 
+    def get_all_lists(self) -> Dict[str, List[dict]]:
+        """Get ALL player lists (both auctioned and unauctioned) for backup purposes"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT list_name, player_name, base_price, auctioned FROM player_lists"
+            )
+            lists = {}
+            for row in cursor.fetchall():
+                list_name = row["list_name"]
+                if list_name not in lists:
+                    lists[list_name] = []
+                lists[list_name].append(
+                    {
+                        "player_name": row["player_name"],
+                        "base_price": row["base_price"],
+                        "auctioned": bool(row["auctioned"]),
+                    }
+                )
+            return lists
+
     def get_list_order(self) -> List[str]:
         """Get the order of lists"""
         with self._transaction() as conn:

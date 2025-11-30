@@ -62,10 +62,24 @@ class AuctionBot(commands.Bot):
         self.countdown_channel: Optional[discord.TextChannel] = None
         self.countdown_task: Optional[asyncio.Task] = None
 
+        # Background tasks set - prevents 'Task destroyed but pending' warnings
+        self._background_tasks: set = set()
+
         # Dynamic player gap (can be changed at runtime) - instance variable
         self.player_gap = PLAYER_GAP
 
         self.user_teams: Dict[int, str] = {}
+
+    def create_background_task(self, coro):
+        """Create a background task that cleans up after itself.
+
+        Use this instead of asyncio.create_task() for fire-and-forget coroutines
+        like update_stats_display() to prevent 'Task destroyed' warnings.
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     async def cancel_countdown_task(self):
         """Safely cancel the countdown task with proper cleanup"""
@@ -359,7 +373,7 @@ async def bid(interaction: discord.Interaction):
         await interaction.channel.send(embed=bid_embed)
 
     # Update stats
-    asyncio.create_task(bot.update_stats_display())
+    bot.create_background_task(bot.update_stats_display())
 
     if not bot.countdown_task or bot.countdown_task.done():
         bot.countdown_task = asyncio.create_task(countdown_loop(interaction.channel))
@@ -372,7 +386,7 @@ async def undo_bid(interaction: discord.Interaction):
     await interaction.response.send_message(msg)
     if success:
         # Update live stats
-        asyncio.create_task(bot.update_stats_display())
+        bot.create_background_task(bot.update_stats_display())
 
 
 @bot.tree.command(name="bidhistory", description="Show recent bid history")
@@ -480,7 +494,7 @@ async def rollback_sale(interaction: discord.Interaction):
         msg += f"Amount refunded: {format_amount(result['amount'])}\n"
         msg += "Excel file updated."
 
-        asyncio.create_task(bot.update_stats_display())
+        bot.create_background_task(bot.update_stats_display())
         await interaction.response.send_message(msg)
     else:
         await interaction.response.send_message(
@@ -498,7 +512,7 @@ async def rollback_sale(interaction: discord.Interaction):
 async def release_player(interaction: discord.Interaction, team: str, player: str):
     success, message = bot.auction_manager.release_retained_player(team, player)
     if success:
-        asyncio.create_task(bot.update_stats_display())
+        bot.create_background_task(bot.update_stats_display())
     await interaction.response.send_message(message, ephemeral=not success)
 
 
@@ -543,7 +557,7 @@ async def release_multiple(interaction: discord.Interaction, releases: str):
         )
 
     if released:
-        asyncio.create_task(bot.update_stats_display())
+        bot.create_background_task(bot.update_stats_display())
 
     await interaction.followup.send(msg)
 
@@ -562,7 +576,7 @@ async def add_to_squad(
 ):
     success, msg = bot.auction_manager.manual_add_player(team, player, price)
     if success:
-        asyncio.create_task(bot.update_stats_display())
+        bot.create_background_task(bot.update_stats_display())
     await interaction.response.send_message(msg)
 
 
@@ -583,7 +597,7 @@ async def trade(
 ):
     success, msg = bot.auction_manager.trade_player(player, from_team, to_team, price)
     if success:
-        asyncio.create_task(bot.update_stats_display())
+        bot.create_background_task(bot.update_stats_display())
     await interaction.response.send_message(msg)
 
 
@@ -647,7 +661,7 @@ async def sold_to(interaction: discord.Interaction, team: str):
         if winning_team != "UNSOLD":
             await interaction.channel.send(bot.auction_manager.get_purse_display())
 
-        asyncio.create_task(bot.update_stats_display())
+        bot.create_background_task(bot.update_stats_display())
 
         await asyncio.sleep(2)
         await start_next_player(interaction.channel)
@@ -1021,14 +1035,22 @@ class ShowListsView(discord.ui.View):
         self.pages = pages
         self.current_page = 0
         self.user_id = user_id
+        self.message: Optional[discord.Message] = None  # Store message reference
         self.update_buttons()
 
     async def on_timeout(self):
         """Disable buttons when view times out to prevent memory leak"""
         for item in self.children:
             item.disabled = True
-        # Clear references
+        # Try to edit the message to show disabled buttons
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.HTTPException):
+                pass  # Message was deleted or we can't edit it
+        # Clear references to help garbage collection
         self.pages = None
+        self.message = None
 
     def update_buttons(self):
         self.prev_button.disabled = self.current_page == 0
@@ -1147,6 +1169,8 @@ async def show_lists(interaction: discord.Interaction):
     else:
         view = ShowListsView(pages, interaction.user.id)
         await interaction.response.send_message(pages[0], view=view)
+        # Store message reference for timeout cleanup
+        view.message = await interaction.original_response()
 
 
 @bot.tree.command(
@@ -1485,6 +1509,9 @@ async def reset_purses(interaction: discord.Interaction):
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def clear_auction(interaction: discord.Interaction):
+    # Defer immediately since this operation may take time (backup + clear)
+    await interaction.response.defer()
+
     # Remove duplicates first
     duplicates_removed = bot.auction_manager.db.remove_duplicate_players()
 
@@ -1497,7 +1524,7 @@ async def clear_auction(interaction: discord.Interaction):
         msg += f"\n💾 Backup created: `{backup_path}`"
     if duplicates_removed > 0:
         msg += f"\n🔧 Removed {duplicates_removed} duplicate player entries."
-    await interaction.response.send_message(msg)
+    await interaction.followup.send(msg)
 
 
 @bot.tree.command(
@@ -1876,13 +1903,13 @@ async def countdown_loop(channel: discord.TextChannel):
                 if last_msg:
                     try:
                         await last_msg.delete()
-                    except:
-                        pass
+                    except (discord.NotFound, discord.HTTPException):
+                        pass  # Message already deleted or can't be deleted
 
                 # Safety check - if no player, just move on
                 if not current_player_name:
                     await asyncio.sleep(2)
-                    asyncio.create_task(start_next_player(channel))
+                    await start_next_player(channel)
                     return
 
                 # Finalize the unsold sale
@@ -1899,7 +1926,7 @@ async def countdown_loop(channel: discord.TextChannel):
                     )
 
                 await asyncio.sleep(2)
-                asyncio.create_task(start_next_player(channel))
+                await start_next_player(channel)
                 return
 
         else:
@@ -1935,15 +1962,15 @@ async def countdown_loop(channel: discord.TextChannel):
                 if last_msg:
                     try:
                         await last_msg.delete()
-                    except:
-                        pass
+                    except (discord.NotFound, discord.HTTPException):
+                        pass  # Message already deleted or can't be deleted
 
                 player_name = bot.auction_manager.current_player
 
                 # Safety check - if no player, just move on
                 if not player_name:
                     await asyncio.sleep(2)
-                    asyncio.create_task(start_next_player(channel))
+                    await start_next_player(channel)
                     return
 
                 # CRITICAL: Check if player was already sold before finalizing
@@ -1962,7 +1989,7 @@ async def countdown_loop(channel: discord.TextChannel):
                     bot.auction_manager._reset_player_state()
                     bot.auction_manager._save_state_to_db()
                     await asyncio.sleep(2)
-                    asyncio.create_task(start_next_player(channel))
+                    await start_next_player(channel)
                     return
 
                 success, team, amount = await bot.auction_manager.finalize_sale()
@@ -1974,7 +2001,7 @@ async def countdown_loop(channel: discord.TextChannel):
                     )
                     await channel.send(sold_msg)
                     await channel.send(bot.auction_manager.get_purse_display())
-                    asyncio.create_task(bot.update_stats_display())
+                    bot.create_background_task(bot.update_stats_display())
                 elif success and team == "UNSOLD":
                     # Player went unsold (no bids)
                     sold_msg = bot.formatter.format_sold_message(
@@ -1988,15 +2015,15 @@ async def countdown_loop(channel: discord.TextChannel):
                     )
 
                 await asyncio.sleep(2)
-                asyncio.create_task(start_next_player(channel))
+                await start_next_player(channel)
                 return
 
         if bot.auction_manager.paused:
             if last_msg:
                 try:
                     await last_msg.delete()
-                except:
-                    pass
+                except (discord.NotFound, discord.HTTPException):
+                    pass  # Message already deleted or can't be deleted
             break
 
 
@@ -2020,10 +2047,16 @@ async def on_app_command_error(
         )
     else:
         logger.error(f"Command error: {error}", exc_info=True)
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                f"An error occurred: {str(error)}", ephemeral=True
-            )
+        error_msg = f"An error occurred: {str(error)}"
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(error_msg, ephemeral=True)
+            else:
+                # Response already sent (e.g., after defer), use followup
+                await interaction.followup.send(error_msg, ephemeral=True)
+        except discord.HTTPException:
+            # If all else fails, just log it
+            logger.error(f"Could not send error message to user: {error_msg}")
 
 
 # ============================================================
