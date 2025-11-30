@@ -281,19 +281,17 @@ class FileManager:
     def initialize_excel_with_retained_players(
         filepath: str,
         teams: Dict[str, int],
-        team_squads: Dict[str, List[Tuple[str, int]]],
+        retained_data: Dict[str, List[Tuple[str, int]]],
     ) -> None:
         """Initialize Excel file with retained players already in team sheets.
 
         This should be called at bot startup to populate team sheets with retained players.
         """
         try:
-            from retained_players import RETAINED_PLAYERS
             from config import TEAMS as TEAM_CONFIG
 
             # Initialize fresh Excel
             FileManager.initialize_excel(filepath)
-
             wb = openpyxl.load_workbook(filepath)
 
             header_fill = PatternFill(
@@ -305,7 +303,7 @@ class FileManager:
             )
             summary_font = Font(bold=True)
 
-            # Update each team sheet with their retained players
+            # Update each team sheet with their retained players only
             for team_code in sorted(TEAM_CONFIG.keys()):
                 if team_code in wb.sheetnames:
                     del wb[team_code]
@@ -317,21 +315,11 @@ class FileManager:
                     cell.font = header_font
                     cell.alignment = Alignment(horizontal="center")
 
-                # Get squad from database (includes retained players)
-                squad = team_squads.get(team_code, [])
-                retained = RETAINED_PLAYERS.get(team_code, [])
-                retained_names = {p[0].lower() for p in retained}
-
+                retained = retained_data.get(team_code, [])
                 total_spent = 0
-
-                for player_name, price in squad:
-                    player_type = (
-                        "Retained"
-                        if player_name.lower() in retained_names
-                        else "Bought"
-                    )
+                for player_name, price in retained:
                     safe_player = sanitize_csv_value(player_name)
-                    ts.append([safe_player, format_amount(price), player_type])
+                    ts.append([safe_player, format_amount(price), "Retained"])
                     total_spent += price
 
                 # Summary rows
@@ -339,7 +327,7 @@ class FileManager:
                 purse_left = teams.get(team_code, 0)
 
                 summary_row = ts.max_row + 1
-                ts.append(["Total Players", len(squad), ""])
+                ts.append(["Total Players", len(retained), ""])
                 ts.append(["Total Spent", format_amount(total_spent), ""])
                 ts.append(["Purse Remaining", format_amount(purse_left), ""])
 
@@ -364,16 +352,14 @@ class FileManager:
                 cell.font = header_font
                 cell.alignment = Alignment(horizontal="center")
 
-            from config import TEAMS as TEAM_PURSES
-
-            for team_code in sorted(TEAM_PURSES.keys()):
-                squad = team_squads.get(team_code, [])
-                total_spent = sum(price for _, price in squad)
+            for team_code in sorted(TEAM_CONFIG.keys()):
+                retained = retained_data.get(team_code, [])
+                total_spent = sum(price for _, price in retained)
                 remaining = teams.get(team_code, 0)
                 summary_sheet.append(
                     [
                         team_code,
-                        len(squad),
+                        len(retained),
                         format_amount(total_spent),
                         format_amount(remaining),
                     ]

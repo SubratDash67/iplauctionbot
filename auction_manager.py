@@ -1220,6 +1220,14 @@ class AuctionManager:
         self.stats_channel_id = channel_id
         self._save_state_to_db()
 
+    def set_countdown_gap(self, seconds: int):
+        """Set the time gap between last bid and start of countdown."""
+        self.countdown_gap = seconds
+
+    def set_player_gap(self, seconds: int):
+        """Set the gap between players in auction."""
+        self.player_gap = seconds
+
     def _create_backup(self) -> str:
         """Create a JSON backup of all auction data.
 
@@ -1292,29 +1300,13 @@ class AuctionManager:
             logger.warning(f"Failed to create backup before clear: {e}")
 
         self._reset_state()
-        self.db.full_reset()
-
-        # Re-initialize teams with retained players deducted
-        adjusted_teams = {}
-        for team_code, initial_purse in TEAMS.items():
-            remaining = get_remaining_purse(team_code, initial_purse)
-            adjusted_teams[team_code] = remaining
-
-        # Force initialize teams (since we just did full_reset)
-        self.db.init_teams(adjusted_teams)
-
-        # Re-add retained players to squads
-        self._initialize_retained_players()
-
+        self.db.clear_trade_history()
+        self.db.clear_released_players()
+        self.db.clear_auction_buys()
+        # Do NOT touch retained players or teams
         try:
             # Initialize fresh Excel with all sheets
             self.file_manager.initialize_excel(self.excel_file)
-            # Update with retained players
-            teams = self.db.get_teams()
-            squads = self.db.get_all_squads()
-            self.file_manager.update_individual_team_sheets(
-                self.excel_file, teams, squads
-            )
         except Exception as e:
             logger.error(f"Error reinitializing Excel: {e}")
 
@@ -1369,7 +1361,7 @@ class AuctionManager:
         msg = "**📊 LIVE AUCTION STATS**\n\n"
 
         if data["most_expensive"]:
-            msg += f"💰 **Most Expensive:** {data['most_expensive']['player_name']} - {format_amount(data['most_expensive']['final_price'])}\n"
+            msg += f"💰 **Most Expensive:** {data['most_expensive']['player_name']} - {format_amount(data['most_expensive']['final_price'])} ({data['most_expensive']['team_code']})\n"
         else:
             msg += "💰 **Most Expensive:** None\n"
 
