@@ -594,7 +594,7 @@ async def swaptrade(
     team_a: str,
     player_b: str,
     team_b: str,
-    compensation: float = 0,
+    compensation: float = 0.0,
     compensation_from: str = None,
 ):
     """Swap two players between teams per IPL rules"""
