@@ -541,7 +541,7 @@ class AuctionManager:
             # Mark all remaining unauctioned players in this set as auctioned first
             # This prevents duplicate check from failing when adding to skipped list
             skipped_count = self.db.mark_set_as_auctioned(current_list)
-            
+
             # Create skipped list if doesn't exist
             skipped_list_name = "skipped"
             self.db.create_list(skipped_list_name)
@@ -565,7 +565,9 @@ class AuctionManager:
         self.current_list_index += 1
         self._save_state_to_db()
 
-        return skipped_count, skipped_player_names    def get_skipped_players(self) -> List[Tuple[str, Optional[int]]]:
+        return skipped_count, skipped_player_names
+
+    def get_skipped_players(self) -> List[Tuple[str, Optional[int]]]:
         """Get all players in the skipped list."""
         player_lists = self.db.get_player_lists()
         return player_lists.get("skipped", [])
