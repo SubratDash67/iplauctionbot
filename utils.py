@@ -534,7 +534,9 @@ class FileManager:
 
         Args:
             filepath: Path to Excel file
-            trades: List of trade records with keys: player_name, from_team, to_team, trade_price, original_price, traded_at
+            trades: List of trade records with keys: player_name, from_team, to_team, trade_price,
+                    original_price, traded_at, trade_type, swap_player, swap_player_price,
+                    compensation_amount, compensation_direction
         """
         try:
             if not os.path.exists(filepath):
@@ -552,8 +554,12 @@ class FileManager:
                     "Player Name",
                     "From Team",
                     "To Team",
-                    "Trade Price",
+                    "Trade Price/Salary",
                     "Original Price",
+                    "Trade Type",
+                    "Swap Player",
+                    "Swap Player Salary",
+                    "Compensation",
                     "Timestamp",
                 ]
             )
@@ -572,6 +578,19 @@ class FileManager:
                     safe_player = sanitize_csv_value(
                         trade.get("player_name", "Unknown")
                     )
+                    trade_type = trade.get("trade_type", "cash")
+                    swap_player = trade.get("swap_player", "")
+                    swap_player_price = trade.get("swap_player_price", 0)
+                    compensation = trade.get("compensation_amount", 0)
+                    comp_direction = trade.get("compensation_direction", "")
+
+                    # Format compensation with direction
+                    comp_display = ""
+                    if compensation and compensation > 0:
+                        comp_display = f"{format_amount(compensation)}"
+                        if comp_direction:
+                            comp_display += f" ({comp_direction})"
+
                     ts.append(
                         [
                             safe_player,
@@ -579,17 +598,29 @@ class FileManager:
                             trade.get("to_team", "Unknown"),
                             format_amount(trade.get("trade_price", 0)),
                             format_amount(trade.get("original_price", 0)),
+                            trade_type.upper() if trade_type else "CASH",
+                            swap_player if swap_player else "-",
+                            (
+                                format_amount(swap_player_price)
+                                if swap_player_price
+                                else "-"
+                            ),
+                            comp_display if comp_display else "-",
                             trade.get("traded_at", ""),
                         ]
                     )
 
             # Auto-fit column widths
-            ts.column_dimensions["A"].width = 30
+            ts.column_dimensions["A"].width = 25
             ts.column_dimensions["B"].width = 12
             ts.column_dimensions["C"].width = 12
-            ts.column_dimensions["D"].width = 15
+            ts.column_dimensions["D"].width = 18
             ts.column_dimensions["E"].width = 15
-            ts.column_dimensions["F"].width = 20
+            ts.column_dimensions["F"].width = 12
+            ts.column_dimensions["G"].width = 25
+            ts.column_dimensions["H"].width = 18
+            ts.column_dimensions["I"].width = 20
+            ts.column_dimensions["J"].width = 20
 
             wb.save(filepath)
         except Exception as e:
@@ -805,15 +836,27 @@ class FileManager:
                 FileManager.update_trade_history_sheet(filepath, trades)
 
             # Build traded_to_team mapping for individual team sheets
+            # This maps team code -> set of player names that were traded TO that team
             traded_to_team: Dict[str, Set[str]] = {}
             if trades:
                 for trade in trades:
+                    # Main player goes from from_team to to_team
                     to_team = trade.get("to_team")
                     player_name = trade.get("player_name")
                     if to_team and player_name:
                         if to_team not in traded_to_team:
                             traded_to_team[to_team] = set()
                         traded_to_team[to_team].add(player_name)
+
+                    # For swap trades, swap_player goes from to_team to from_team
+                    trade_type = trade.get("trade_type", "cash")
+                    if trade_type == "swap":
+                        swap_player = trade.get("swap_player")
+                        from_team = trade.get("from_team")
+                        if swap_player and from_team:
+                            if from_team not in traded_to_team:
+                                traded_to_team[from_team] = set()
+                            traded_to_team[from_team].add(swap_player)
 
             # Update Individual Team Sheets
             FileManager.update_individual_team_sheets(
