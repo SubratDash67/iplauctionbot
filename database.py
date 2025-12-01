@@ -191,6 +191,24 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass
+            try:
+                cursor.execute(
+                    "ALTER TABLE auction_state ADD COLUMN max_loaded_set INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute(
+                    "ALTER TABLE auction_state ADD COLUMN trade_channel_id TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute(
+                    "ALTER TABLE auction_state ADD COLUMN trade_message_id TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
 
             cursor.execute(
                 """
@@ -264,10 +282,45 @@ class Database:
                     to_team TEXT NOT NULL,
                     trade_price INTEGER NOT NULL,
                     original_price INTEGER NOT NULL,
+                    trade_type TEXT DEFAULT 'cash',
+                    swap_player TEXT,
+                    swap_player_price INTEGER,
+                    compensation_amount INTEGER DEFAULT 0,
+                    compensation_direction TEXT,
                     traded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """
             )
+
+            # Migration: Add new columns for swap trades
+            try:
+                cursor.execute(
+                    "ALTER TABLE trade_history ADD COLUMN trade_type TEXT DEFAULT 'cash'"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE trade_history ADD COLUMN swap_player TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute(
+                    "ALTER TABLE trade_history ADD COLUMN swap_player_price INTEGER"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute(
+                    "ALTER TABLE trade_history ADD COLUMN compensation_amount INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute(
+                    "ALTER TABLE trade_history ADD COLUMN compensation_direction TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
 
     # ==================== TEAM OPERATIONS ====================
 
@@ -600,9 +653,12 @@ class Database:
             cursor.execute("UPDATE player_lists SET auctioned = 0")
 
     def clear_released_players(self):
-        """Remove the 'released players' list"""
+        """Remove the 'released' list"""
         with self._transaction() as conn:
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM player_lists WHERE list_name = 'released'")
+            cursor.execute("DELETE FROM list_order WHERE list_name = 'released'")
+            # Also clear old name for backwards compatibility
             cursor.execute(
                 "DELETE FROM player_lists WHERE list_name = 'released players'"
             )
@@ -611,9 +667,12 @@ class Database:
             )
 
     def clear_unsold_players(self):
-        """Remove the 'unsold players' list"""
+        """Remove the 'accelerated' list (formerly 'unsold players')"""
         with self._transaction() as conn:
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM player_lists WHERE list_name = 'accelerated'")
+            cursor.execute("DELETE FROM list_order WHERE list_name = 'accelerated'")
+            # Also clear old name for backwards compatibility
             cursor.execute(
                 "DELETE FROM player_lists WHERE list_name = 'unsold players'"
             )
@@ -682,6 +741,61 @@ class Database:
                 WHERE id = 1
             """
             )
+
+    def get_max_loaded_set(self) -> int:
+        """Get the maximum set number that has been loaded"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT max_loaded_set FROM auction_state WHERE id = 1")
+            row = cursor.fetchone()
+            return row["max_loaded_set"] if row and row["max_loaded_set"] else 0
+
+    def set_max_loaded_set(self, max_set: int):
+        """Set the maximum set number that has been loaded"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE auction_state SET max_loaded_set = ? WHERE id = 1", (max_set,)
+            )
+
+    def set_trade_channel(self, channel_id: str, message_id: str = None):
+        """Set the trade log channel and optionally the message ID"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            if message_id:
+                cursor.execute(
+                    "UPDATE auction_state SET trade_channel_id = ?, trade_message_id = ? WHERE id = 1",
+                    (channel_id, message_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE auction_state SET trade_channel_id = ? WHERE id = 1",
+                    (channel_id,),
+                )
+
+    def get_trade_channel(self) -> Tuple[Optional[str], Optional[str]]:
+        """Get the trade log channel and message IDs"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT trade_channel_id, trade_message_id FROM auction_state WHERE id = 1"
+            )
+            row = cursor.fetchone()
+            if row:
+                return row["trade_channel_id"], row["trade_message_id"]
+            return None, None
+
+    def get_all_trades(self) -> List[dict]:
+        """Get all trades for display in trade log"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT player_name, from_team, to_team, trade_price, original_price, 
+                          trade_type, swap_player, swap_player_price, 
+                          compensation_amount, compensation_direction, traded_at
+                   FROM trade_history ORDER BY traded_at DESC"""
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     # ==================== BID HISTORY OPERATIONS ====================
 
@@ -1027,12 +1141,206 @@ class Database:
             )
 
             cursor.execute(
-                """INSERT INTO trade_history (player_name, from_team, to_team, trade_price, original_price)
-                   VALUES (?, ?, ?, ?, ?)""",
+                """INSERT INTO trade_history (player_name, from_team, to_team, trade_price, original_price, trade_type)
+                   VALUES (?, ?, ?, ?, ?, 'cash')""",
                 (actual_player_name, from_team, to_team, price, original_price),
             )
 
             return True
+
+    def swap_players(
+        self,
+        player_a: str,
+        team_a: str,
+        player_b: str,
+        team_b: str,
+        compensation_amount: int = 0,
+        compensation_from: str = None,
+    ) -> Tuple[bool, str]:
+        """
+        Swap two players between teams.
+        Per IPL rules:
+        - Players exchange teams
+        - Each player's salary counts against their NEW team's cap
+        - If values differ, the team getting the higher-valued player pays compensation
+        - Compensation is NOT part of salary cap calculation
+
+        Args:
+            player_a: Player moving from team_a to team_b
+            team_a: Team giving player_a
+            player_b: Player moving from team_b to team_a
+            team_b: Team giving player_b
+            compensation_amount: Amount to be paid as compensation (if values differ)
+            compensation_from: Team paying the compensation ('A' or 'B')
+
+        Returns:
+            Tuple of (success, message)
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # Get player A details from team A
+            cursor.execute(
+                "SELECT id, price, player_name FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                (team_a, player_a),
+            )
+            row_a = cursor.fetchone()
+            if not row_a:
+                return False, f"Player '{player_a}' not found in {team_a}'s squad"
+
+            price_a = row_a["price"]
+            actual_name_a = row_a["player_name"]
+
+            # Get player B details from team B
+            cursor.execute(
+                "SELECT id, price, player_name FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                (team_b, player_b),
+            )
+            row_b = cursor.fetchone()
+            if not row_b:
+                return False, f"Player '{player_b}' not found in {team_b}'s squad"
+
+            price_b = row_b["price"]
+            actual_name_b = row_b["player_name"]
+
+            # Per IPL rules: Each player's salary affects their NEW team's cap
+            # Team A: loses player_a's salary, gains player_b's salary
+            # Team B: loses player_b's salary, gains player_a's salary
+
+            # Check if teams can afford the incoming player's salary
+            cursor.execute("SELECT purse FROM teams WHERE team_code = ?", (team_a,))
+            purse_a = cursor.fetchone()["purse"]
+
+            cursor.execute("SELECT purse FROM teams WHERE team_code = ?", (team_b,))
+            purse_b = cursor.fetchone()["purse"]
+
+            # Net change for team A = +price_a (refund) - price_b (new salary)
+            # Net change for team B = +price_b (refund) - price_a (new salary)
+            net_change_a = price_a - price_b
+            net_change_b = price_b - price_a
+
+            # Check if team A can afford (current purse + net change >= 0)
+            if purse_a + net_change_a < 0:
+                return (
+                    False,
+                    f"{team_a} cannot afford this swap. Would need ₹{abs(purse_a + net_change_a):,} more.",
+                )
+
+            # Check if team B can afford
+            if purse_b + net_change_b < 0:
+                return (
+                    False,
+                    f"{team_b} cannot afford this swap. Would need ₹{abs(purse_b + net_change_b):,} more.",
+                )
+
+            # Remove players from original teams
+            cursor.execute(
+                "DELETE FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                (team_a, player_a),
+            )
+            cursor.execute(
+                "DELETE FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                (team_b, player_b),
+            )
+
+            # Update purses based on salary cap rules
+            # Team A: refund player_a's salary, deduct player_b's salary
+            cursor.execute(
+                "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
+                (price_a, team_a),
+            )
+            cursor.execute(
+                "UPDATE teams SET purse = purse - ? WHERE team_code = ?",
+                (price_b, team_a),
+            )
+
+            # Team B: refund player_b's salary, deduct player_a's salary
+            cursor.execute(
+                "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
+                (price_b, team_b),
+            )
+            cursor.execute(
+                "UPDATE teams SET purse = purse - ? WHERE team_code = ?",
+                (price_a, team_b),
+            )
+
+            # Add players to new teams (keeping their original salaries)
+            cursor.execute(
+                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
+                   VALUES (?, ?, ?, 'traded', ?)""",
+                (
+                    team_b,
+                    actual_name_a,
+                    price_a,
+                    team_a,
+                ),  # Player A goes to Team B at their salary
+            )
+            cursor.execute(
+                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
+                   VALUES (?, ?, ?, 'traded', ?)""",
+                (
+                    team_a,
+                    actual_name_b,
+                    price_b,
+                    team_b,
+                ),  # Player B goes to Team A at their salary
+            )
+
+            # Determine compensation direction based on values
+            compensation_direction = None
+            if compensation_amount > 0 and compensation_from:
+                compensation_direction = f"{compensation_from}_pays"
+
+            # Record trade history for player A (going to team B)
+            cursor.execute(
+                """INSERT INTO trade_history 
+                   (player_name, from_team, to_team, trade_price, original_price, trade_type, 
+                    swap_player, swap_player_price, compensation_amount, compensation_direction)
+                   VALUES (?, ?, ?, ?, ?, 'swap', ?, ?, ?, ?)""",
+                (
+                    actual_name_a,
+                    team_a,
+                    team_b,
+                    price_a,
+                    price_a,
+                    actual_name_b,
+                    price_b,
+                    compensation_amount,
+                    compensation_direction,
+                ),
+            )
+
+            # Record trade history for player B (going to team A)
+            cursor.execute(
+                """INSERT INTO trade_history 
+                   (player_name, from_team, to_team, trade_price, original_price, trade_type, 
+                    swap_player, swap_player_price, compensation_amount, compensation_direction)
+                   VALUES (?, ?, ?, ?, ?, 'swap', ?, ?, ?, ?)""",
+                (
+                    actual_name_b,
+                    team_b,
+                    team_a,
+                    price_b,
+                    price_b,
+                    actual_name_a,
+                    price_a,
+                    compensation_amount,
+                    compensation_direction,
+                ),
+            )
+
+            return True, "Swap completed successfully"
+
+    def get_player_price_in_squad(self, team: str, player_name: str) -> Optional[int]:
+        """Get a player's current price/salary in a team's squad"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT price FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                (team, player_name),
+            )
+            row = cursor.fetchone()
+            return row["price"] if row else None
 
     def get_stats_data(self) -> dict:
         with self._transaction() as conn:
@@ -1206,12 +1514,6 @@ class Database:
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM trade_history")
-
-    def get_all_trades(self) -> List[dict]:
-        with self._transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM trade_history ORDER BY traded_at")
-            return [dict(row) for row in cursor.fetchall()]
 
     def remove_duplicate_players(self):
         with self._transaction() as conn:

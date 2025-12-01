@@ -616,10 +616,12 @@ class FileManager:
             if not os.path.exists(filepath):
                 FileManager.initialize_excel(filepath)
 
-            if retained_players is None:
+            # Use a different variable name internally to avoid shadowing
+            retained_players_dict = retained_players
+            if retained_players_dict is None:
                 from retained_players import RETAINED_PLAYERS
 
-                retained_players = RETAINED_PLAYERS
+                retained_players_dict = RETAINED_PLAYERS
 
             if traded_to_team is None:
                 traded_to_team = {}
@@ -657,12 +659,12 @@ class FileManager:
                     cell.alignment = Alignment(horizontal="center")
 
                 squad = team_squads.get(team_code, [])
-                retained = retained_players.get(team_code, [])
-                retained_names = {p[0].lower() for p in retained}
+                retained_data = retained_players_dict.get(team_code, [])
+                retained_names = {p[0].lower() for p in retained_data}
                 traded_names = {p.lower() for p in traded_to_team.get(team_code, set())}
 
                 # Partition squad
-                retained_players = [
+                squad_retained = [
                     (p, pr) for p, pr in squad if p.lower() in retained_names
                 ]
                 bought_players = [
@@ -678,10 +680,10 @@ class FileManager:
 
                 # Write sections
                 row = 2
-                if retained_players:
+                if squad_retained:
                     ts.append(["--- Retained ---", "", ""])
                     row += 1
-                    for player, price in retained_players:
+                    for player, price in squad_retained:
                         ts.append(
                             [
                                 sanitize_csv_value(player),

@@ -125,20 +125,42 @@ class AuctionManager:
         return count
 
     def _load_auction_excel(
-        self, filepath: str, max_set: Optional[int] = None
+        self, filepath: str, num_sets: Optional[int] = None
     ) -> Tuple[bool, str]:
-        """Load players from Excel file (Auction_list.xlsx)."""
+        """Load NEXT N sets from Excel file (Auction_list.xlsx).
+
+        Args:
+            filepath: Path to the Excel file
+            num_sets: Number of NEW sets to load (loads sets from current_max+1 to current_max+num_sets)
+        """
         from openpyxl import load_workbook
 
         try:
-            # Get existing lists to avoid duplicates
+            # Get currently loaded max set number
+            current_max_loaded = self.db.get_max_loaded_set()
+
+            # Calculate the range of sets to load
+            start_set = current_max_loaded + 1
+            end_set = current_max_loaded + num_sets if num_sets else 67
+
+            # Get existing lists to check for special lists (accelerated, released)
             existing_lists = self.db.get_player_lists()
             existing_set_names = set(existing_lists.keys()) if existing_lists else set()
+
+            # Special lists that should not be treated as regular sets
+            special_lists = {
+                "accelerated",
+                "released",
+                "released players",
+                "unsold players",
+                "skipped",
+            }
 
             players_by_set = {}
             set_number_map = {}  # Stores {set_name: set_number} for sorting
             row_count = 0
             skipped_count = 0
+            max_set_loaded = current_max_loaded
 
             # Load Excel workbook
             wb = load_workbook(filepath, read_only=True, data_only=True)
@@ -240,10 +262,14 @@ class AuctionManager:
                     skipped_count += 1
                     continue
 
-                # Apply max_set filter
-                if max_set is not None and set_number > max_set:
+                # Apply set range filter: only load sets in range [start_set, end_set]
+                if set_number < start_set or set_number > end_set:
                     skipped_count += 1
                     continue
+
+                # Track max set number loaded
+                if set_number > max_set_loaded:
+                    max_set_loaded = set_number
 
                 # Determine Set Name (use SET column, e.g., "BA1")
                 if set_name_val:
@@ -251,8 +277,11 @@ class AuctionManager:
                 else:
                     set_key = f"Set {set_number}"
 
-                # Skip if this set already exists
-                if set_key.lower() in existing_set_names:
+                # Skip if this set already exists (as a regular set, not special list)
+                if (
+                    set_key.lower() in existing_set_names
+                    and set_key.lower() not in special_lists
+                ):
                     skipped_count += 1
                     continue
 
@@ -282,9 +311,14 @@ class AuctionManager:
             wb.close()
 
             if not players_by_set:
+                if current_max_loaded >= 67:
+                    return (
+                        True,
+                        f"All 67 sets have been loaded. Use `/clear` to reload from beginning.",
+                    )
                 return (
                     True,
-                    f"No new sets to load (sets 1-{max_set} already loaded). Use a higher number or /clear to reload.",
+                    f"No new sets found in range {start_set}-{end_set}. Currently at set {current_max_loaded}.",
                 )
 
             total_players = 0
@@ -293,25 +327,45 @@ class AuctionManager:
                 total_players += len(players)
 
             # Update list order to include new sets (merge with existing)
+            # Keep special lists at their positions
             if players_by_set:
                 existing_order = self.db.get_list_order()
-                existing_order_set = set(existing_order)
+                existing_order_lower = {s.lower() for s in existing_order}
+
+                # Separate special lists from regular sets
+                special_at_start = []  # released goes at start
+                special_at_end = []  # accelerated, skipped go at end
+                regular_sets = []
+
+                for list_name in existing_order:
+                    if list_name.lower() == "released":
+                        special_at_start.append(list_name)
+                    elif list_name.lower() in special_lists:
+                        special_at_end.append(list_name)
+                    else:
+                        regular_sets.append(list_name)
 
                 # Sort new sets by their set number
                 new_sets_sorted = sorted(
                     players_by_set.keys(), key=lambda k: set_number_map.get(k, 999)
                 )
 
-                # Merge: keep existing order, append new sets
-                final_order = existing_order + [
-                    s for s in new_sets_sorted if s.lower() not in existing_order_set
-                ]
+                # Add new sets to regular sets list (avoid duplicates)
+                for s in new_sets_sorted:
+                    if s.lower() not in existing_order_lower:
+                        regular_sets.append(s)
+
+                # Final order: released (if exists) -> regular sets -> accelerated/skipped
+                final_order = special_at_start + regular_sets + special_at_end
                 self.db.set_list_order(final_order)
 
-            max_set_msg = f" (sets 1-{max_set})" if max_set else ""
+            # Update max loaded set in database
+            if max_set_loaded > current_max_loaded:
+                self.db.set_max_loaded_set(max_set_loaded)
+
             return (
                 True,
-                f"Loaded {total_players} players from {len(players_by_set)} NEW sets{max_set_msg}",
+                f"Loaded {total_players} players from {len(players_by_set)} NEW sets (sets {start_set}-{max_set_loaded})",
             )
 
         except FileNotFoundError:
@@ -396,8 +450,14 @@ class AuctionManager:
             return False, str(e)
 
     def load_players_from_sets(
-        self, max_set: int, filepath: str = None
+        self, num_sets: int, filepath: str = None
     ) -> Tuple[bool, str]:
+        """Load the next N sets from Excel file.
+
+        Args:
+            num_sets: Number of new sets to load
+            filepath: Path to Excel file (optional)
+        """
         import os
 
         if filepath is None:
@@ -406,10 +466,10 @@ class AuctionManager:
         if not os.path.exists(filepath):
             return False, f"Excel file not found: {filepath}"
 
-        if max_set < 1 or max_set > 67:
-            return False, "max_set must be between 1 and 67"
+        if num_sets < 1 or num_sets > 67:
+            return False, "Number of sets must be between 1 and 67"
 
-        return self._load_auction_excel(filepath, max_set=max_set)
+        return self._load_auction_excel(filepath, num_sets=num_sets)
 
     def set_list_order(self, order: List[str]) -> Tuple[bool, str]:
         order_lower = [name.lower() for name in order]
@@ -445,11 +505,36 @@ class AuctionManager:
 
         return removed, not_found
 
-    def skip_current_set(self) -> int:
-        """Skip all remaining players in current set and move to next set."""
+    def skip_current_set(self) -> Tuple[int, List[str]]:
+        """Skip all remaining players in current set and move to next set.
+        Skipped players are moved to the 'skipped' list for potential re-auction.
+
+        Returns:
+            Tuple of (count of skipped players, list of skipped player names)
+        """
         current_list = self.get_current_list_name()
         if not current_list:
-            return 0
+            return 0, []
+
+        # Get all unauctioned players in current set before marking
+        player_lists = self.db.get_player_lists()
+        players_in_set = player_lists.get(current_list, [])
+        skipped_player_names = [name for name, _ in players_in_set]
+
+        if skipped_player_names:
+            # Create skipped list if doesn't exist
+            skipped_list_name = "skipped"
+            self.db.create_list(skipped_list_name)
+
+            # Move players to skipped list
+            for player_name, base_price in players_in_set:
+                self.db.add_player_to_list(skipped_list_name, player_name, base_price)
+
+            # Ensure skipped list is at the end of list order
+            current_order = self.db.get_list_order()
+            if skipped_list_name not in [o.lower() for o in current_order]:
+                current_order.append(skipped_list_name)
+                self.db.set_list_order(current_order)
 
         # Mark all remaining unauctioned players in this set as auctioned
         skipped_count = self.db.mark_set_as_auctioned(current_list)
@@ -461,7 +546,12 @@ class AuctionManager:
         self.current_list_index += 1
         self._save_state_to_db()
 
-        return skipped_count
+        return skipped_count, skipped_player_names
+
+    def get_skipped_players(self) -> List[Tuple[str, Optional[int]]]:
+        """Get all players in the skipped list."""
+        player_lists = self.db.get_player_lists()
+        return player_lists.get("skipped", [])
 
     # ==================== AUCTION CONTROL ====================
 
@@ -532,7 +622,11 @@ class AuctionManager:
         self._save_state_to_db()
 
     def get_next_player(self) -> Tuple[bool, str, Optional[int], bool]:
-        """Get the next player. Safely handles state to avoid re-auctioning active player."""
+        """Get the next player. Safely handles state to avoid re-auctioning active player.
+
+        Returns:
+            Tuple of (success, player_name, base_price, is_first_in_list)
+        """
         # Check if current player is already active and valid
         if self.current_player:
             # Check if this player is already in a squad (sold)
@@ -561,12 +655,22 @@ class AuctionManager:
                 return (True, self.current_player, self.base_price, False)
 
         list_order = self.db.get_list_order()
+        if not list_order:
+            return (False, None, None, False)
+
         auctioned_count = self.db.get_auctioned_count()
         is_start_of_auction = auctioned_count == 0
 
         old_list_index = self.current_list_index
         list_advanced = False
 
+        # Ensure current_list_index is within bounds
+        if self.current_list_index >= len(list_order):
+            self.current_list_index = 0
+            self._save_state_to_db()
+
+        # First pass: try from current index to end
+        start_index = self.current_list_index
         while self.current_list_index < len(list_order):
             current_list = list_order[self.current_list_index]
 
@@ -592,6 +696,30 @@ class AuctionManager:
                 self.current_list_index += 1
                 self._save_state_to_db()
                 list_advanced = True
+
+        # Second pass: check from beginning up to where we started (in case new sets were added)
+        self.current_list_index = 0
+        while self.current_list_index < start_index:
+            current_list = list_order[self.current_list_index]
+
+            player_data = self.db.get_random_player_from_list(current_list)
+            if player_data:
+                player_id, player_name, base_price = player_data
+                self.db.mark_player_auctioned_by_id(player_id)
+
+                self._reset_player_state()
+                self.current_player = player_name
+                self.base_price = (
+                    base_price if base_price is not None else DEFAULT_BASE_PRICE
+                )
+                self.current_bid = self.base_price
+                self._save_state_to_db()
+
+                # This is first in a new list since we wrapped around
+                return (True, player_name, self.base_price, True)
+            else:
+                self.current_list_index += 1
+                self._save_state_to_db()
 
         return (False, None, None, False)
 
@@ -727,7 +855,7 @@ class AuctionManager:
     def trade_player(
         self, player_name: str, from_team: str, to_team: str, price_cr: float
     ) -> Tuple[bool, str]:
-        """Trade player between teams"""
+        """Trade player between teams (cash trade)"""
         # Convert Crores to Rupees (1 Cr = 10,000,000)
         price = int(price_cr * 10_000_000)
 
@@ -745,25 +873,161 @@ class AuctionManager:
         )
         if success:
             # Update Excel after trade
-            try:
-                teams = self.db.get_teams()
-                squads = self.db.get_all_squads()
-                sales = self.db.get_all_sales()
-                unsold = self.db.get_unsold_players_for_excel()
-                released = self.db.get_released_players_for_excel()
-                trades = self.db.get_all_trades()
-
-                self.file_manager.regenerate_excel_from_db(
-                    self.excel_file, sales, teams, squads, unsold, released, trades
-                )
-            except Exception as e:
-                logger.error(f"Error updating Excel after trade: {e}")
-
+            self._update_excel_after_trade()
             return (
                 True,
                 f"Traded **{player_name}** from **{from_team.upper()}** to **{to_team_upper}** for {format_amount(price)}",
             )
         return False, "Trade failed. Check if player exists in source team."
+
+    def swap_players(
+        self,
+        player_a: str,
+        team_a: str,
+        player_b: str,
+        team_b: str,
+        compensation_cr: float = 0,
+        compensation_from: str = None,
+    ) -> Tuple[bool, str]:
+        """
+        Swap two players between teams.
+        Per IPL rules: players exchange teams, salaries count against NEW team's cap.
+        Compensation (if any) is NOT part of salary cap.
+        """
+        team_a_upper = team_a.upper()
+        team_b_upper = team_b.upper()
+
+        # Validate teams exist
+        teams = self.db.get_teams()
+        if team_a_upper not in teams:
+            return False, f"Invalid team: {team_a}"
+        if team_b_upper not in teams:
+            return False, f"Invalid team: {team_b}"
+
+        # Convert compensation to rupees
+        compensation_amount = (
+            int(compensation_cr * 10_000_000) if compensation_cr else 0
+        )
+
+        success, msg = self.db.swap_players(
+            player_a,
+            team_a_upper,
+            player_b,
+            team_b_upper,
+            compensation_amount,
+            compensation_from.upper() if compensation_from else None,
+        )
+
+        if success:
+            # Update Excel after swap
+            self._update_excel_after_trade()
+
+            # Get actual prices for message
+            price_a = self.db.get_player_price_in_squad(
+                team_b_upper, player_a
+            )  # A is now in B
+            price_b = self.db.get_player_price_in_squad(
+                team_a_upper, player_b
+            )  # B is now in A
+
+            msg = f"**Swap Completed!**\n"
+            msg += f"• **{player_a}** ({format_amount(price_a or 0)}) → **{team_b_upper}**\n"
+            msg += (
+                f"• **{player_b}** ({format_amount(price_b or 0)}) → **{team_a_upper}**"
+            )
+
+            if compensation_amount > 0 and compensation_from:
+                msg += f"\n• Compensation: **{compensation_from.upper()}** pays {format_amount(compensation_amount)}"
+
+            return True, msg
+
+        return False, msg
+
+    def _update_excel_after_trade(self):
+        """Helper to update Excel file after any trade operation"""
+        try:
+            teams = self.db.get_teams()
+            squads = self.db.get_all_squads()
+            sales = self.db.get_all_sales()
+            unsold = self.db.get_unsold_players_for_excel()
+            released = self.db.get_released_players_for_excel()
+            trades = self.db.get_all_trades()
+
+            self.file_manager.regenerate_excel_from_db(
+                self.excel_file, sales, teams, squads, unsold, released, trades
+            )
+        except Exception as e:
+            logger.error(f"Error updating Excel after trade: {e}")
+
+    def get_trade_log_message(self) -> str:
+        """Generate a formatted trade log message for display"""
+        trades = self.db.get_all_trades()
+
+        if not trades:
+            return "📋 **Trade Log**\n\n_No trades have been made yet._"
+
+        msg = "📋 **Trade Log**\n\n"
+
+        # Group swap trades to avoid duplicates (swaps create 2 records)
+        seen_swaps = set()
+
+        for trade in trades:
+            trade_type = trade.get("trade_type", "cash")
+
+            if trade_type == "swap":
+                # Create a unique key for this swap pair
+                swap_key = tuple(
+                    sorted(
+                        [
+                            f"{trade['player_name']}:{trade['from_team']}",
+                            f"{trade.get('swap_player', '')}:{trade['to_team']}",
+                        ]
+                    )
+                )
+
+                if swap_key in seen_swaps:
+                    continue
+                seen_swaps.add(swap_key)
+
+                msg += f"🔄 **Swap Trade**\n"
+                msg += f"   • {trade['player_name']} ({format_amount(trade['trade_price'])}) "
+                msg += f"**{trade['from_team']}** → **{trade['to_team']}**\n"
+
+                if trade.get("swap_player"):
+                    msg += f"   • {trade['swap_player']} ({format_amount(trade.get('swap_player_price', 0))}) "
+                    msg += f"**{trade['to_team']}** → **{trade['from_team']}**\n"
+
+                if (
+                    trade.get("compensation_amount")
+                    and trade["compensation_amount"] > 0
+                ):
+                    direction = trade.get("compensation_direction", "")
+                    msg += f"   💰 Compensation: {format_amount(trade['compensation_amount'])}"
+                    if direction:
+                        msg += f" (paid by {direction.replace('_pays', '')})"
+                    msg += "\n"
+            else:
+                # Cash trade
+                msg += f"💵 **Cash Trade**\n"
+                msg += f"   • {trade['player_name']}: "
+                msg += f"**{trade['from_team']}** → **{trade['to_team']}** "
+                msg += f"for {format_amount(trade['trade_price'])}\n"
+
+                original = trade.get("original_price", 0)
+                if original and original != trade["trade_price"]:
+                    msg += f"   📊 Original price: {format_amount(original)}\n"
+
+            msg += "\n"
+
+        return msg.strip()
+
+    def set_trade_channel(self, channel_id: str, message_id: str = None):
+        """Set the trade log channel"""
+        self.db.set_trade_channel(channel_id, message_id)
+
+    def get_trade_channel(self) -> Tuple[Optional[str], Optional[str]]:
+        """Get the trade log channel and message IDs"""
+        return self.db.get_trade_channel()
 
     def manual_add_player(
         self, team: str, player: str, price_cr: float
@@ -900,7 +1164,7 @@ class AuctionManager:
     # ==================== RE-AUCTION UNSOLD PLAYERS ====================
 
     def reauction_player(self, player_name: str) -> Tuple[bool, str]:
-        """Re-auction a player - moves them to 'unsold players' list at the end"""
+        """Re-auction a player - moves them to 'accelerated' list at the end"""
         player_data = self.db.find_player_by_name(player_name)
 
         if not player_data:
@@ -932,28 +1196,28 @@ class AuctionManager:
         if base_price is None:
             base_price = DEFAULT_BASE_PRICE
 
-        # Create "unsold players" list if it doesn't exist and add player there
-        unsold_list_name = "unsold players"
-        self.db.create_list(unsold_list_name)
+        # Create "accelerated" list if it doesn't exist and add player there
+        accelerated_list_name = "accelerated"
+        self.db.create_list(accelerated_list_name)
 
-        # Remove from original list
+        # Remove from original list (mark as not existing there anymore)
         self.db.remove_player_from_list(list_name, actual_name)
 
         # Reset the auctioned status of original entry
         self.db.reset_player_auctioned_status(player_id)
 
-        # Add to unsold players list
-        self.db.add_player_to_list(unsold_list_name, actual_name, base_price)
+        # Add to accelerated list
+        self.db.add_player_to_list(accelerated_list_name, actual_name, base_price)
 
-        # Ensure "unsold players" list is at the end of list order
+        # Ensure "accelerated" list is at the end of list order
         current_order = self.db.get_list_order()
-        if unsold_list_name not in [o.lower() for o in current_order]:
-            current_order.append(unsold_list_name)
+        if accelerated_list_name not in [o.lower() for o in current_order]:
+            current_order.append(accelerated_list_name)
             self.db.set_list_order(current_order)
 
         return (
             True,
-            f"**{actual_name}** has been added to **Unsold Players** list with base price {format_amount(base_price)}",
+            f"**{actual_name}** has been added to **Accelerated** list with base price {format_amount(base_price)}",
         )
 
     # ==================== RELEASE PLAYERS ====================
@@ -1009,15 +1273,23 @@ class AuctionManager:
         except Exception as e:
             logger.error(f"Error adding released player to sales: {e}")
 
-        # 4. Add to "released players" list for re-auction (separate from unsold)
-        released_list_name = "released players"
+        # 4. Add to "released" list for re-auction (at the START of list order)
+        released_list_name = "released"
         self.db.create_list(released_list_name)
         self.db.add_player_to_list(released_list_name, p_name, salary)
 
-        # Ensure "released players" list is at the end of list order
+        # Ensure "released" list is at the START of list order
         current_order = self.db.get_list_order()
         if released_list_name not in [o.lower() for o in current_order]:
-            current_order.append(released_list_name)
+            # Insert at beginning
+            current_order.insert(0, released_list_name)
+            self.db.set_list_order(current_order)
+        elif current_order[0].lower() != released_list_name:
+            # Move to beginning if not already there
+            current_order = [
+                o for o in current_order if o.lower() != released_list_name
+            ]
+            current_order.insert(0, released_list_name)
             self.db.set_list_order(current_order)
 
         # 5. Update Excel
@@ -1037,7 +1309,7 @@ class AuctionManager:
 
         return (
             True,
-            f'Released {p_name} from {team_upper}. Refunded {format_amount(salary)}. Player added to "Released Players" list.',
+            f'Released {p_name} from {team_upper}. Refunded {format_amount(salary)}. Player added to "Released" set (will appear first).',
         )
 
     # ==================== SALE FINALIZATION ====================
@@ -1238,11 +1510,20 @@ class AuctionManager:
         # 2. Clear Database Tables (granularly)
         self.db.clear_auction_buys()  # Deletes bought/traded players, keeps retained
         self.db.clear_released_players()  # Deletes released players list
-        self.db.clear_unsold_players()  # Deletes unsold players list
+        self.db.clear_unsold_players()  # Deletes accelerated/unsold players list
         self.db.clear_sales()  # Deletes sales history
         self.db.clear_bid_history()  # Deletes bid history
         self.db.clear_trade_history()  # Deletes trade history
         self.db.clear_all_auto_bids()  # Deletes auto bids
+
+        # Also clear skipped players list
+        try:
+            self.db.delete_set("skipped")
+        except Exception:
+            pass
+
+        # Reset max loaded set counter so /loadsets starts fresh
+        self.db.set_max_loaded_set(0)
 
         # 3. Allow players to be bid on again
         self.db.reset_all_player_auction_status()
@@ -1287,7 +1568,11 @@ class AuctionManager:
         msg = "**Recent Bids:**\n```\n"
         for bid in bids[-limit:]:
             auto = "[AUTO]" if bid.get("is_auto_bid") else ""
-            msg += f"{bid['team_code']:6} : {format_amount(bid['amount'])} {auto}\n"
+            player_name = bid.get("player_name", "")
+            player_suffix = (
+                f" ({player_name[:15]})" if player_name and not player else ""
+            )
+            msg += f"{bid['team_code']:6} : {format_amount(bid['amount'])} {auto}{player_suffix}\n"
         msg += "```"
         return msg
 

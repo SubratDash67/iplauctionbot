@@ -552,7 +552,9 @@ async def add_to_squad(
     await interaction.response.send_message(msg)
 
 
-@bot.tree.command(name="trade", description="Trade a player between teams (Admin only)")
+@bot.tree.command(
+    name="trade", description="Trade a player between teams for cash (Admin only)"
+)
 @app_commands.describe(
     player="Player Name",
     from_team="Source Team",
@@ -570,6 +572,95 @@ async def trade(
     success, msg = bot.auction_manager.trade_player(player, from_team, to_team, price)
     if success:
         bot.create_background_task(bot.update_stats_display())
+        bot.create_background_task(update_trade_log())
+    await interaction.response.send_message(msg)
+
+
+@bot.tree.command(
+    name="swaptrade", description="Swap two players between teams (Admin only)"
+)
+@app_commands.describe(
+    player_a="First player name (from Team A)",
+    team_a="Team A (giving player_a)",
+    player_b="Second player name (from Team B)",
+    team_b="Team B (giving player_b)",
+    compensation="Compensation amount in Crores (optional, if values differ)",
+    compensation_from="Team paying compensation (A or B, optional)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def swaptrade(
+    interaction: discord.Interaction,
+    player_a: str,
+    team_a: str,
+    player_b: str,
+    team_b: str,
+    compensation: float = 0,
+    compensation_from: str = None,
+):
+    """Swap two players between teams per IPL rules"""
+    success, msg = bot.auction_manager.swap_players(
+        player_a, team_a, player_b, team_b, compensation, compensation_from
+    )
+    if success:
+        bot.create_background_task(bot.update_stats_display())
+        bot.create_background_task(update_trade_log())
+    await interaction.response.send_message(msg)
+
+
+@bot.tree.command(
+    name="settradechannel", description="Set channel for trade log display (Admin only)"
+)
+@app_commands.describe(channel="Channel for trade log display")
+@app_commands.checks.has_permissions(administrator=True)
+async def settradechannel(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+):
+    """Set the channel where trade log will be displayed and auto-updated"""
+    await interaction.response.defer()
+
+    # Send initial trade log message
+    trade_msg = bot.auction_manager.get_trade_log_message()
+    msg = await channel.send(trade_msg)
+
+    # Save channel and message IDs
+    bot.auction_manager.set_trade_channel(str(channel.id), str(msg.id))
+
+    await interaction.followup.send(
+        f"✅ Trade log channel set to {channel.mention}. The trade log will auto-update after each trade."
+    )
+
+
+async def update_trade_log():
+    """Update the trade log message in the configured channel"""
+    try:
+        channel_id, message_id = bot.auction_manager.get_trade_channel()
+        if not channel_id or not message_id:
+            return
+
+        channel = bot.get_channel(int(channel_id))
+        if not channel:
+            return
+
+        try:
+            msg = await channel.fetch_message(int(message_id))
+            trade_content = bot.auction_manager.get_trade_log_message()
+            await msg.edit(content=trade_content)
+        except discord.NotFound:
+            # Message was deleted, send a new one
+            trade_content = bot.auction_manager.get_trade_log_message()
+            new_msg = await channel.send(trade_content)
+            bot.auction_manager.set_trade_channel(channel_id, str(new_msg.id))
+        except Exception as e:
+            logger.error(f"Error updating trade log message: {e}")
+    except Exception as e:
+        logger.error(f"Error in update_trade_log: {e}")
+
+
+@bot.tree.command(name="tradelog", description="Show all trades")
+async def tradelog(interaction: discord.Interaction):
+    """Display the trade log"""
+    msg = bot.auction_manager.get_trade_log_message()
     await interaction.response.send_message(msg)
 
 
@@ -686,7 +777,7 @@ async def reauction_player(interaction: discord.Interaction, player_name: str):
 @bot.tree.command(name="showunsold", description="Show all unsold players (Admin only)")
 @app_commands.checks.has_permissions(administrator=True)
 async def show_unsold(interaction: discord.Interaction):
-    """Show all players that went unsold"""
+    """Show all players that went unsold (in Accelerated list)"""
     unsold = bot.auction_manager.db.get_unsold_players()
 
     if not unsold:
@@ -695,7 +786,7 @@ async def show_unsold(interaction: discord.Interaction):
         )
         return
 
-    msg = f"**📋 Unsold Players ({len(unsold)} total):**\n```\n"
+    msg = f"**📋 Unsold/Accelerated Players ({len(unsold)} total):**\n```\n"
 
     current_list = ""
     for pid, pname, list_name, base_price in unsold:
@@ -709,7 +800,7 @@ async def show_unsold(interaction: discord.Interaction):
         msg += f"  {pname:30} | Base: {price_str}\n"
 
     msg += "```\n"
-    msg += "Use `/reauction player_name` to bring back a single player\n"
+    msg += "Use `/reauction player_name` to bring back a single player to Accelerated\n"
     msg += "Use `/reauctionall` to bring back ALL unsold players"
 
     if len(msg) > 2000:
@@ -961,20 +1052,20 @@ async def load_csv(interaction: discord.Interaction, list_name: str, filepath: s
 
 @bot.tree.command(
     name="loadsets",
-    description="Load players from IPL Excel by set number (Admin only)",
+    description="Load the NEXT N sets from IPL Excel (Admin only)",
 )
-@app_commands.describe(max_set="Load players from sets 1 to this number (1-67)")
+@app_commands.describe(num_sets="Number of NEW sets to load (1-67)")
 @app_commands.checks.has_permissions(administrator=True)
-async def load_sets(interaction: discord.Interaction, max_set: int):
+async def load_sets(interaction: discord.Interaction, num_sets: int):
     await interaction.response.defer()
 
-    if max_set < 1 or max_set > 67:
+    if num_sets < 1 or num_sets > 67:
         await interaction.followup.send(
-            "max_set must be between 1 and 67", ephemeral=True
+            "Number of sets must be between 1 and 67", ephemeral=True
         )
         return
 
-    success, message = bot.auction_manager.load_players_from_sets(max_set)
+    success, message = bot.auction_manager.load_players_from_sets(num_sets)
     await interaction.followup.send(message)
 
 
@@ -1263,9 +1354,12 @@ async def resume_auction(interaction: discord.Interaction):
     bot.auction_manager.last_bid_time = time.time()
     bot.auction_manager._save_state_to_db()
 
+    current_set = bot.auction_manager.get_current_list_name()
+    set_info = f" (Set: **{current_set.upper()}**)" if current_set else ""
+
     if bot.auction_manager.current_player:
         await interaction.response.send_message(
-            f"Auction resumed! Bidding continues for **{bot.auction_manager.current_player}**"
+            f"Auction resumed!{set_info} Bidding continues for **{bot.auction_manager.current_player}**"
         )
         if not bot.countdown_task or bot.countdown_task.done():
             bot.countdown_task = asyncio.create_task(
@@ -1273,7 +1367,7 @@ async def resume_auction(interaction: discord.Interaction):
             )
     else:
         await interaction.response.send_message(
-            "Auction resumed! Finding next player..."
+            f"Auction resumed!{set_info} Finding next player..."
         )
         await start_next_player(interaction.channel)
 
@@ -1321,17 +1415,49 @@ async def skip_set(interaction: discord.Interaction):
         )
         return
 
-    skipped_count = bot.auction_manager.skip_current_set()
+    skipped_count, skipped_names = bot.auction_manager.skip_current_set()
     await bot.cancel_countdown_task()
 
     await interaction.response.send_message(
         f"⏭️ **Skipped set {current_set.upper()}!**\n"
-        f"{skipped_count} remaining players marked as unsold.\n"
-        f"Moving to next set..."
+        f"{skipped_count} players moved to **Skipped** list.\n"
+        f"Use `/showskipped` to view them. Moving to next set..."
     )
 
     await asyncio.sleep(2)
     await start_next_player(interaction.channel)
+
+
+@bot.tree.command(
+    name="showskipped", description="Show all skipped players (Admin only)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def show_skipped(interaction: discord.Interaction):
+    """Show all players that were skipped"""
+    skipped = bot.auction_manager.get_skipped_players()
+
+    if not skipped:
+        await interaction.response.send_message(
+            "No skipped players found.", ephemeral=True
+        )
+        return
+
+    msg = f"**⏭️ Skipped Players ({len(skipped)} total):**\n```\n"
+
+    for pname, base_price in skipped:
+        price_str = format_amount(base_price) if base_price else "N/A"
+        msg += f"  {pname:30} | Base: {price_str}\n"
+
+    msg += "```\n"
+    msg += "Skipped players will be auctioned at the end of all regular sets.\n"
+    msg += "Use `/reauction player_name` to bring back a specific player."
+
+    if len(msg) > 2000:
+        await interaction.response.send_message(msg[:2000])
+        for chunk in [msg[i : i + 2000] for i in range(2000, len(msg), 2000)]:
+            await interaction.followup.send(chunk)
+    else:
+        await interaction.response.send_message(msg)
 
 
 @bot.tree.command(
@@ -1379,22 +1505,6 @@ async def set_stats_channel(
         f"Stats channel set to {channel.mention}. I will start updating stats there."
     )
     await bot.update_stats_display()
-
-
-@bot.tree.command(
-    name="setcountdown", description="Set countdown duration in seconds (Admin only)"
-)
-@app_commands.describe(seconds="Countdown duration (5-300)")
-@app_commands.checks.has_permissions(administrator=True)
-async def set_countdown(interaction: discord.Interaction, seconds: int):
-    if bot.auction_manager.set_countdown(seconds):
-        await interaction.response.send_message(
-            f"Countdown set to **{seconds}** seconds"
-        )
-    else:
-        await interaction.response.send_message(
-            "Countdown must be between 5 and 300 seconds.", ephemeral=True
-        )
 
 
 @bot.tree.command(
@@ -1653,10 +1763,11 @@ async def admin_help_command(interaction: discord.Interaction):
         name="Re-Auction & Data",
         value=(
             "`/loadretained` - Init/Reset Retained\n"
-            "`/showunsold` - View unsold\n"
+            "`/showunsold` - View unsold/accelerated\n"
+            "`/showskipped` - View skipped players\n"
             "`/reauction player` - Re-auction one\n"
             "`/reauctionall` - Re-auction all\n"
-            "`/loadsets max_set` - Load sets\n"
+            "`/loadsets N` - Load next N sets\n"
             "`/addplayer` - Add player"
         ),
         inline=True,
@@ -1664,7 +1775,6 @@ async def admin_help_command(interaction: discord.Interaction):
     embed3.add_field(
         name="Settings & Communication",
         value=(
-            "`/setcountdown secs` - Timer duration\n"
             "`/setcountdowngap secs` - Bid-to-timer gap\n"
             "`/setplayergap secs` - Player gap\n"
             "`/setstatschannel #ch` - Stats channel\n"
