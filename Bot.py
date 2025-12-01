@@ -1566,30 +1566,125 @@ async def reset_purses(interaction: discord.Interaction):
     await interaction.response.send_message(msg)
 
 
+# ============================================================
+# CLEAR CONFIRMATION VIEW
+# ============================================================
+
+
+class ClearConfirmView(discord.ui.View):
+    """Confirmation view for /clear command with backup option"""
+
+    def __init__(self, user_id: int):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.create_backup = False
+        self.confirmed = False
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(
+        label="Clear with Backup", style=discord.ButtonStyle.primary, emoji="💾"
+    )
+    async def backup_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
+            return
+        self.create_backup = True
+        self.confirmed = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(
+        label="Clear without Backup", style=discord.ButtonStyle.danger, emoji="🗑️"
+    )
+    async def no_backup_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
+            return
+        self.create_backup = False
+        self.confirmed = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
+            return
+        self.confirmed = False
+        self.stop()
+        await interaction.response.defer()
+
+
 @bot.tree.command(
     name="clear", description="Clear auction data/buys/released but keep retained data"
 )
 @app_commands.checks.has_permissions(administrator=True)
 async def clear_auction(interaction: discord.Interaction):
     """Clears trade, released, and auction data but keeps retained players."""
-    await interaction.response.defer()
+    # Show confirmation with backup option
+    view = ClearConfirmView(interaction.user.id)
+    await interaction.response.send_message(
+        "**⚠️ Clear Auction Data**\n\n"
+        "This will:\n"
+        "• Remove all auction buys, trades, and released players\n"
+        "• Reset team purses to config values\n"
+        "• Keep retained players\n"
+        "• Reset player lists for fresh loading\n\n"
+        "**Do you want to create a backup before clearing?**",
+        view=view,
+    )
+
+    await view.wait()
+
+    # Disable buttons after interaction
+    for item in view.children:
+        item.disabled = True
+
+    try:
+        await interaction.edit_original_response(view=view)
+    except:
+        pass
+
+    if not view.confirmed:
+        await interaction.followup.send("❌ Clear operation cancelled.", ephemeral=True)
+        return
 
     # Remove duplicates first
     duplicates_removed = bot.auction_manager.db.remove_duplicate_players()
 
-    # Updated to call clear_all_data which now intelligently clears non-retained only
-    backup_path = bot.auction_manager.clear_all_data()
+    # Call clear_all_data with backup option
+    backup_path = bot.auction_manager.clear_all_data(create_backup=view.create_backup)
 
     await bot.cancel_countdown_task()
 
     msg = "**✅ Auction data cleared!**\n"
     msg += "• Auction buys, trades, and released players removed.\n"
     msg += "• **Retained players preserved.**\n"
-    msg += "• Team purses reset to (Original - Retained Cost).\n"
+    msg += "• Team purses reset to config values.\n"
     msg += "• All players marked available for auction."
 
     if backup_path:
         msg += f"\n\n💾 Backup created: `{backup_path}`"
+    elif view.create_backup:
+        msg += "\n\n⚠️ Backup creation failed."
+    else:
+        msg += "\n\n📝 No backup created (as requested)."
+
     if duplicates_removed > 0:
         msg += f"\n🔧 Removed {duplicates_removed} duplicate player entries."
 

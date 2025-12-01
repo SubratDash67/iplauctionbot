@@ -178,26 +178,33 @@ class AuctionManager:
                 # Check if this row contains headers
                 row_str = [str(cell).strip().upper() if cell else "" for cell in row]
 
-                # Look for key columns
+                # Look for key columns - more flexible matching
                 for col_idx, cell_val in enumerate(row_str):
-                    if "PLAYER NO" in cell_val or cell_val == "PLAYER NO.":
+                    # Match "PLAYER NO" or "PLAYER NO."
+                    if "PLAYER NO" in cell_val or "PLAYER_NO" in cell_val:
                         col_indices["player_no"] = col_idx
-                    elif cell_val == "SET NO" or cell_val == "SET NO.":
+                    # Match "SET NO" or "SET NO." - check this BEFORE "SET"
+                    elif "SET NO" in cell_val or "SET_NO" in cell_val:
                         col_indices["set_no"] = col_idx
-                    elif cell_val == "SET" and "SET NO" not in cell_val:
+                    # Match "SET" but not "SET NO"
+                    elif cell_val == "SET":
                         col_indices["set"] = col_idx
+                    # Match "PLAYER" exactly (not "PLAYER NO")
                     elif cell_val == "PLAYER":
                         col_indices["player"] = col_idx
-                    elif cell_val == "BASE":
+                    # Match "BASE" or "BASE PRICE"
+                    elif "BASE" in cell_val:
                         col_indices["base"] = col_idx
 
                 # If we found the key columns, this is the header row
                 if "set_no" in col_indices and "player" in col_indices:
                     header_row = row_idx
+                    logger.info(f"Found header row at {row_idx}: {col_indices}")
                     break
 
             if header_row is None:
                 # Default to first row as header, standard column positions
+                # Based on user's columns: A=Player NO., B=SET NO, C=SET, D=PLAYER, E=BASE
                 header_row = 1
                 col_indices = {
                     "player_no": 0,  # Column A
@@ -206,6 +213,7 @@ class AuctionManager:
                     "player": 3,  # Column D
                     "base": 4,  # Column E
                 }
+                logger.info(f"Using default column mapping: {col_indices}")
 
             # Process data rows
             for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
@@ -316,9 +324,13 @@ class AuctionManager:
                         True,
                         f"All 67 sets have been loaded. Use `/clear` to reload from beginning.",
                     )
+                # Provide more diagnostic info
+                debug_info = f"Header row: {header_row}, Columns: {col_indices}, Rows scanned: {row_count}, Skipped: {skipped_count}"
+                logger.warning(f"No sets loaded. {debug_info}")
                 return (
-                    True,
-                    f"No new sets found in range {start_set}-{end_set}. Currently at set {current_max_loaded}.",
+                    False,
+                    f"No new sets found in range {start_set}-{end_set}. Currently at set {current_max_loaded}.\n"
+                    f"Debug: {debug_info}",
                 )
 
             total_players = 0
@@ -1491,18 +1503,25 @@ class AuctionManager:
 
         return sale
 
-    def clear_all_data(self) -> Optional[str]:
+    def clear_all_data(self, create_backup: bool = True) -> Optional[str]:
         """
         Clear auction progress (buys, bids, releases) but KEEP retained players.
-        Resets teams to (Original Purse - Retained Cost).
+        Resets teams to config purse values.
+
+        Args:
+            create_backup: Whether to create a backup before clearing (default: True)
+
+        Returns:
+            Path to backup file if created, None otherwise
         """
-        # Create backup before destructive operation
+        # Create backup before destructive operation (if requested)
         backup_path = None
-        try:
-            backup_path = self._create_backup()
-            logger.info(f"Created backup before clear: {backup_path}")
-        except Exception as e:
-            logger.warning(f"Failed to create backup before clear: {e}")
+        if create_backup:
+            try:
+                backup_path = self._create_backup()
+                logger.info(f"Created backup before clear: {backup_path}")
+            except Exception as e:
+                logger.warning(f"Failed to create backup before clear: {e}")
 
         # 1. Clear State
         self._reset_state()
@@ -1528,15 +1547,15 @@ class AuctionManager:
         # 3. Allow players to be bid on again
         self.db.reset_all_player_auction_status()
 
-        # 4. Reset Team Purses
-        # Logic: Reset to original, then subtract cost of remaining squad (which is just retained now)
-        self.db.reset_teams()
-        squads = self.db.get_all_squads()  # Should only contain retained now
+        # 4. Reset Team Purses to config values
+        # The TEAMS config already has the remaining purse after retained players.
+        # We should NOT deduct retained cost again - it's already accounted for.
+        from config import TEAMS
 
-        for team, players in squads.items():
-            retained_cost = sum(price for _, price in players)
-            if retained_cost > 0:
-                self.db.deduct_from_purse(team, retained_cost)
+        for team_code, purse in TEAMS.items():
+            self.db.update_team_purse(team_code, purse)
+            # Also update original_purse to match config
+            self.db.set_original_purse(team_code, purse)
 
         # 5. Regenerate Excel with clean state
         try:

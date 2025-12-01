@@ -390,6 +390,16 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("UPDATE teams SET purse = original_purse")
 
+    def set_original_purse(self, team_code: str, purse: int) -> bool:
+        """Update a team's original_purse value"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE teams SET original_purse = ? WHERE team_code = ?",
+                (purse, team_code),
+            )
+            return cursor.rowcount > 0
+
     # ==================== TEAM SQUAD OPERATIONS ====================
 
     def add_to_squad(
@@ -1219,18 +1229,33 @@ class Database:
             net_change_a = price_a - price_b
             net_change_b = price_b - price_a
 
-            # Check if team A can afford (current purse + net change >= 0)
-            if purse_a + net_change_a < 0:
+            # Also account for compensation in affordability check
+            comp_change_a = 0
+            comp_change_b = 0
+            if compensation_amount > 0 and compensation_from:
+                if compensation_from.upper() == team_a:
+                    comp_change_a = -compensation_amount  # A pays
+                    comp_change_b = compensation_amount  # B receives
+                else:
+                    comp_change_a = compensation_amount  # A receives
+                    comp_change_b = -compensation_amount  # B pays
+
+            # Total change including compensation
+            total_change_a = net_change_a + comp_change_a
+            total_change_b = net_change_b + comp_change_b
+
+            # Check if team A can afford (current purse + total change >= 0)
+            if purse_a + total_change_a < 0:
                 return (
                     False,
-                    f"{team_a} cannot afford this swap. Would need ₹{abs(purse_a + net_change_a):,} more.",
+                    f"{team_a} cannot afford this swap. Would need ₹{abs(purse_a + total_change_a):,} more.",
                 )
 
             # Check if team B can afford
-            if purse_b + net_change_b < 0:
+            if purse_b + total_change_b < 0:
                 return (
                     False,
-                    f"{team_b} cannot afford this swap. Would need ₹{abs(purse_b + net_change_b):,} more.",
+                    f"{team_b} cannot afford this swap. Would need ₹{abs(purse_b + total_change_b):,} more.",
                 )
 
             # Remove players from original teams
@@ -1286,10 +1311,31 @@ class Database:
                 ),  # Player B goes to Team A at their salary
             )
 
-            # Determine compensation direction based on values
+            # Handle compensation transfer (NOT part of salary cap)
+            # Compensation is separate from player salaries - it's cash between teams
             compensation_direction = None
             if compensation_amount > 0 and compensation_from:
                 compensation_direction = f"{compensation_from}_pays"
+
+                # Determine which team pays and which receives
+                if compensation_from.upper() == team_a:
+                    # Team A pays compensation to Team B
+                    paying_team = team_a
+                    receiving_team = team_b
+                else:
+                    # Team B pays compensation to Team A
+                    paying_team = team_b
+                    receiving_team = team_a
+
+                # Transfer compensation (deduct from payer, add to receiver)
+                cursor.execute(
+                    "UPDATE teams SET purse = purse - ? WHERE team_code = ?",
+                    (compensation_amount, paying_team),
+                )
+                cursor.execute(
+                    "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
+                    (compensation_amount, receiving_team),
+                )
 
             # Record trade history for player A (going to team B)
             cursor.execute(
