@@ -1,4 +1,3 @@
-
 # Bot.py
 """
 Discord Auction Bot - Main Application
@@ -581,7 +580,8 @@ async def add_player(
         )
     else:
         await interaction.response.send_message(
-            f"Failed to add player to list **{list_name}**.", ephemeral=True
+            f"Failed to add **{player_name}** - player may already exist in lists or squads.",
+            ephemeral=True,
         )
 
 
@@ -1298,7 +1298,7 @@ async def clear_auction(interaction: discord.Interaction):
         "• Remove all auction buys, trades, and released players\n"
         "• Reset team purses to config values\n"
         "• Keep retained players\n"
-        "• Reset player lists for fresh loading\n\n"
+        "• Clear all player lists (use `/loadsets` to reload)\n\n"
         "**Do you want to create a backup before clearing?**",
         view=view,
     )
@@ -1330,7 +1330,7 @@ async def clear_auction(interaction: discord.Interaction):
     msg += "• Auction buys, trades, and released players removed.\n"
     msg += "• **Retained players preserved.**\n"
     msg += "• Team purses reset to config values.\n"
-    msg += "• All players marked available for auction."
+    msg += "• Player lists cleared - use `/loadsets` to reload sets."
 
     if backup_path:
         msg += f"\n\n💾 Backup created: `{backup_path}`"
@@ -1839,9 +1839,13 @@ class TradeConfirmView(discord.ui.View):
                 pass
 
     @discord.ui.button(label="Confirm Trade ✅", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This is not your confirmation!", ephemeral=True)
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
             return
 
         # Perform the trade
@@ -1865,13 +1869,17 @@ class TradeConfirmView(discord.ui.View):
     @discord.ui.button(label="Cancel ❌", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This is not your confirmation!", ephemeral=True)
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
             return
 
         for item in self.children:
             item.disabled = True
         try:
-            await interaction.response.edit_message(content="Trade cancelled by user.", view=self)
+            await interaction.response.edit_message(
+                content="Trade cancelled by user.", view=self
+            )
         except Exception:
             await interaction.response.send_message("Trade cancelled.", ephemeral=True)
 
@@ -1909,9 +1917,13 @@ class SwapConfirmView(discord.ui.View):
                 pass
 
     @discord.ui.button(label="Confirm Swap ✅", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This is not your confirmation!", ephemeral=True)
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
             return
 
         success, msg = self.bot_ref.auction_manager.swap_players(
@@ -1938,13 +1950,17 @@ class SwapConfirmView(discord.ui.View):
     @discord.ui.button(label="Cancel ❌", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This is not your confirmation!", ephemeral=True)
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
             return
 
         for item in self.children:
             item.disabled = True
         try:
-            await interaction.response.edit_message(content="Swap cancelled by user.", view=self)
+            await interaction.response.edit_message(
+                content="Swap cancelled by user.", view=self
+            )
         except Exception:
             await interaction.response.send_message("Swap cancelled.", ephemeral=True)
 
@@ -1979,8 +1995,14 @@ async def trade(
         description=f"Trade **{player}** from **{from_team.upper()}** → **{to_team.upper()}** for **{format_amount(price_rupees)}**",
         color=discord.Color.orange(),
     )
-    embed.add_field(name=f"{from_team.upper()} Purse", value=f"{format_amount(from_purse)}", inline=True)
-    embed.add_field(name=f"{to_team.upper()} Purse", value=f"{format_amount(to_purse)}", inline=True)
+    embed.add_field(
+        name=f"{from_team.upper()} Purse",
+        value=f"{format_amount(from_purse)}",
+        inline=True,
+    )
+    embed.add_field(
+        name=f"{to_team.upper()} Purse", value=f"{format_amount(to_purse)}", inline=True
+    )
     embed.set_footer(text="Confirm to execute the trade. This action is logged.")
 
     view = TradeConfirmView(bot, player, from_team, to_team, price, interaction.user.id)
@@ -2021,18 +2043,37 @@ async def swaptrade(
         description=f"Swap **{player_a}** ({team_a.upper()}) ↔ **{player_b}** ({team_b.upper()})",
         color=discord.Color.orange(),
     )
-    embed.add_field(name=f"{team_a.upper()} Purse", value=f"{format_amount(purse_a)}", inline=True)
-    embed.add_field(name=f"{team_b.upper()} Purse", value=f"{format_amount(purse_b)}", inline=True)
+    embed.add_field(
+        name=f"{team_a.upper()} Purse", value=f"{format_amount(purse_a)}", inline=True
+    )
+    embed.add_field(
+        name=f"{team_b.upper()} Purse", value=f"{format_amount(purse_b)}", inline=True
+    )
     if comp_rupees > 0 and compensation_from:
-        embed.add_field(name="Compensation", value=f"{format_amount(comp_rupees)} (paid by {compensation_from})", inline=False)
+        embed.add_field(
+            name="Compensation",
+            value=f"{format_amount(comp_rupees)} (paid by {compensation_from})",
+            inline=False,
+        )
     embed.set_footer(text="Confirm to execute the swap. This action is logged.")
 
-    view = SwapConfirmView(bot, player_a, team_a, player_b, team_b, compensation, compensation_from, interaction.user.id)
+    view = SwapConfirmView(
+        bot,
+        player_a,
+        team_a,
+        player_b,
+        team_b,
+        compensation,
+        compensation_from,
+        interaction.user.id,
+    )
     msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     view.message = msg
 
 
-@bot.tree.command(name="settradechannel", description="Set channel for trade log display (Admin only)")
+@bot.tree.command(
+    name="settradechannel", description="Set channel for trade log display (Admin only)"
+)
 @app_commands.describe(channel="Channel for trade log display")
 @app_commands.checks.has_permissions(administrator=True)
 async def settradechannel(
@@ -2265,7 +2306,7 @@ async def reauction_all(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="reauctionlist",
-    description="Bring back unsold players from a specific set (Admin only)"
+    description="Bring back unsold players from a specific set (Admin only)",
 )
 @app_commands.describe(
     set_name="Set name to re-auction unsold players from (e.g., M1, BA1)"
@@ -2298,7 +2339,7 @@ async def reauction_from_list(interaction: discord.Interaction, set_name: str):
 
 @bot.tree.command(
     name="reauctionmultiple",
-    description="Re-auction multiple specific players by name (Admin only)"
+    description="Re-auction multiple specific players by name (Admin only)",
 )
 @app_commands.describe(
     player_names="Comma-separated player names (e.g., Player1, Player2, Player3)"
@@ -2343,7 +2384,9 @@ async def reauction_multiple(interaction: discord.Interaction, player_names: str
 # ============================================================
 
 
-@bot.tree.command(name="findplayer", description="Find a player across lists, squads, and sales")
+@bot.tree.command(
+    name="findplayer", description="Find a player across lists, squads, and sales"
+)
 @app_commands.describe(name="Player name (partial matches allowed)")
 async def find_player_cmd(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
@@ -2367,7 +2410,9 @@ async def find_player_cmd(interaction: discord.Interaction, name: str):
     price="New base price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)",
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def change_base_price_cmd(interaction: discord.Interaction, players: str, price: float):
+async def change_base_price_cmd(
+    interaction: discord.Interaction, players: str, price: float
+):
     await interaction.response.defer(ephemeral=True)
     success, msg = bot.auction_manager.change_base_price(players, price)
     if success:

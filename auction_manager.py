@@ -335,9 +335,11 @@ class AuctionManager:
                 )
 
             total_players = 0
+            total_skipped = 0
             for set_name, players in players_by_set.items():
-                self.db.add_players_to_list(set_name, players)
-                total_players += len(players)
+                added, skipped = self.db.add_players_to_list(set_name, players)
+                total_players += added
+                total_skipped += skipped
 
             # Update list order to include new sets (merge with existing)
             # Keep special lists at their positions
@@ -376,10 +378,11 @@ class AuctionManager:
             if max_set_loaded > current_max_loaded:
                 self.db.set_max_loaded_set(max_set_loaded)
 
-            return (
-                True,
-                f"Loaded {total_players} players from {len(players_by_set)} NEW sets (sets {start_set}-{max_set_loaded})",
-            )
+            msg = f"Loaded {total_players} players from {len(players_by_set)} NEW sets (sets {start_set}-{max_set_loaded})"
+            if total_skipped > 0:
+                msg += f"\n⚠️ Skipped {total_skipped} duplicate players (already in lists or squads)"
+
+            return (True, msg)
 
         except FileNotFoundError:
             return False, f"Excel file not found: {filepath}"
@@ -535,11 +538,15 @@ class AuctionManager:
         skipped_player_names = [name for name, _ in players_in_set]
 
         if skipped_player_names:
+            # Mark all remaining unauctioned players in this set as auctioned first
+            # This prevents duplicate check from failing when adding to skipped list
+            skipped_count = self.db.mark_set_as_auctioned(current_list)
+            
             # Create skipped list if doesn't exist
             skipped_list_name = "skipped"
             self.db.create_list(skipped_list_name)
 
-            # Move players to skipped list
+            # Move players to skipped list (now they won't conflict since they're auctioned)
             for player_name, base_price in players_in_set:
                 self.db.add_player_to_list(skipped_list_name, player_name, base_price)
 
@@ -548,9 +555,8 @@ class AuctionManager:
             if skipped_list_name not in [o.lower() for o in current_order]:
                 current_order.append(skipped_list_name)
                 self.db.set_list_order(current_order)
-
-        # Mark all remaining unauctioned players in this set as auctioned
-        skipped_count = self.db.mark_set_as_auctioned(current_list)
+        else:
+            skipped_count = 0
 
         # Clear current player state
         self._reset_player_state()
@@ -559,9 +565,7 @@ class AuctionManager:
         self.current_list_index += 1
         self._save_state_to_db()
 
-        return skipped_count, skipped_player_names
-
-    def get_skipped_players(self) -> List[Tuple[str, Optional[int]]]:
+        return skipped_count, skipped_player_names    def get_skipped_players(self) -> List[Tuple[str, Optional[int]]]:
         """Get all players in the skipped list."""
         player_lists = self.db.get_player_lists()
         return player_lists.get("skipped", [])
@@ -1209,18 +1213,12 @@ class AuctionManager:
         if base_price is None:
             base_price = DEFAULT_BASE_PRICE
 
-        # Create "accelerated" list if it doesn't exist and add player there
+        # Create "accelerated" list if it doesn't exist
         accelerated_list_name = "accelerated"
         self.db.create_list(accelerated_list_name)
 
-        # Remove from original list (mark as not existing there anymore)
-        self.db.remove_player_from_list(list_name, actual_name)
-
-        # Reset the auctioned status of original entry
-        self.db.reset_player_auctioned_status(player_id)
-
-        # Add to accelerated list
-        self.db.add_player_to_list(accelerated_list_name, actual_name, base_price)
+        # Move player to accelerated list (updates list_name and resets auctioned status)
+        self.db.move_player_to_list_by_id(player_id, accelerated_list_name)
 
         # Ensure "accelerated" list is at the end of list order
         current_order = self.db.get_list_order()
@@ -1455,7 +1453,7 @@ class AuctionManager:
         self.player_gap = seconds
 
     def _create_backup(self) -> str:
-        """Create a JSON backup of all auction data.""" 
+        """Create a JSON backup of all auction data."""
         import json
         from datetime import datetime
 
@@ -1510,6 +1508,7 @@ class AuctionManager:
     def clear_all_data(self, create_backup: bool = True) -> Optional[str]:
         """
         Clear auction progress (buys, bids, releases) but KEEP retained players.
+        Also clears player_lists so sets can be reloaded.
         Resets teams to config purse values.
 
         Args:
@@ -1539,19 +1538,19 @@ class AuctionManager:
         self.db.clear_trade_history()  # Deletes trade history
         self.db.clear_all_auto_bids()  # Deletes auto bids
 
-        # Also clear skipped players list
-        try:
-            self.db.delete_set("skipped")
-        except Exception:
-            pass
+        # Clear player_lists so sets can be reloaded from scratch
+        self.db.clear_player_lists()
+
+        # Also clear skipped players list (already included in clear_player_lists)
+        # try:
+        #     self.db.delete_set("skipped")
+        # except Exception:
+        #     pass
 
         # Reset max loaded set counter so /loadsets starts fresh
         self.db.set_max_loaded_set(0)
 
-        # 3. Allow players to be bid on again
-        self.db.reset_all_player_auction_status()
-
-        # 4. Reset Team Purses to config values
+        # 3. Reset Team Purses to config values
         # The TEAMS config already has the remaining purse after retained players.
         # We should NOT deduct retained cost again - it's already accounted for.
         from config import TEAMS
@@ -1561,11 +1560,10 @@ class AuctionManager:
             # Also update original_purse to match config
             self.db.set_original_purse(team_code, purse)
 
-        # 5. Regenerate Excel with clean state
+        # 4. Regenerate Excel with clean state (retained players only)
         try:
             teams = self.db.get_teams()
-            squads = self.db.get_all_squads()
-            # Everything else is empty
+            squads = self.db.get_all_squads()  # Will contain only retained players now
             self.file_manager.initialize_excel_with_retained_players(
                 self.excel_file, teams, squads
             )
@@ -1707,7 +1705,10 @@ class AuctionManager:
             except Exception as e:
                 logger.error(f"Error updating Excel after change base price: {e}")
 
-            return True, f"Updated base price for {updated} players in RELEASED set to {format_amount(new_price)}"
+            return (
+                True,
+                f"Updated base price for {updated} players in RELEASED set to {format_amount(new_price)}",
+            )
         else:
             names = [n.strip() for n in players_arg.split(",") if n.strip()]
             if not names:

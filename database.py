@@ -534,8 +534,31 @@ class Database:
     def add_player_to_list(
         self, list_name: str, player_name: str, base_price: Optional[int] = None
     ) -> bool:
+        """Add a single player to a list with duplicate checking.
+
+        Returns False if player already exists in:
+        - player_lists (not yet auctioned)
+        - team_squads (already sold/retained)
+        """
         with self._transaction() as conn:
             cursor = conn.cursor()
+
+            # Check if player already exists in player_lists (not yet auctioned)
+            cursor.execute(
+                "SELECT 1 FROM player_lists WHERE LOWER(player_name) = LOWER(?) AND auctioned = 0",
+                (player_name,),
+            )
+            if cursor.fetchone():
+                return False
+
+            # Check if player already exists in team_squads
+            cursor.execute(
+                "SELECT 1 FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
+            )
+            if cursor.fetchone():
+                return False
+
             cursor.execute(
                 "INSERT INTO player_lists (list_name, player_name, base_price) VALUES (?, ?, ?)",
                 (list_name.lower(), player_name, base_price),
@@ -563,13 +586,45 @@ class Database:
     def add_players_to_list(
         self, list_name: str, players: List[Tuple[str, Optional[int]]]
     ):
+        """Add players to a list with duplicate checking.
+
+        Skips players who are:
+        1. Already in any player_list (not yet auctioned)
+        2. Already in any team's squad (retained, bought, or traded)
+        """
         with self._transaction() as conn:
             cursor = conn.cursor()
+
+            # Get all existing players in player_lists (case-insensitive) - only non-auctioned
+            cursor.execute(
+                "SELECT LOWER(player_name) FROM player_lists WHERE auctioned = 0"
+            )
+            existing_in_lists = {row[0] for row in cursor.fetchall()}
+
+            # Get all existing players in team_squads (case-insensitive)
+            cursor.execute("SELECT LOWER(player_name) FROM team_squads")
+            existing_in_squads = {row[0] for row in cursor.fetchall()}
+
+            added_count = 0
+            skipped_count = 0
             for player_name, base_price in players:
+                player_lower = player_name.lower()
+                # Skip if player already exists anywhere
+                if (
+                    player_lower in existing_in_lists
+                    or player_lower in existing_in_squads
+                ):
+                    skipped_count += 1
+                    continue
+
                 cursor.execute(
                     "INSERT INTO player_lists (list_name, player_name, base_price) VALUES (?, ?, ?)",
                     (list_name.lower(), player_name, base_price),
                 )
+                existing_in_lists.add(player_lower)  # Track newly added players
+                added_count += 1
+
+            return added_count, skipped_count
 
     def get_player_lists(self) -> Dict[str, List[Tuple[str, Optional[int]]]]:
         with self._transaction() as conn:
@@ -1087,6 +1142,20 @@ class Database:
                 "UPDATE player_lists SET auctioned = 0 WHERE id = ?", (player_id,)
             )
 
+    def move_player_to_list_by_id(self, player_id: int, new_list_name: str) -> bool:
+        """Move a player to a different list and reset their auctioned status.
+
+        This is used for re-auction operations where we want to move a player
+        from one list to another without triggering duplicate checks.
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE player_lists SET list_name = ?, auctioned = 0 WHERE id = ?",
+                (new_list_name.lower(), player_id),
+            )
+            return cursor.rowcount > 0
+
     def delete_last_bid(self, player_name: str):
         with self._transaction() as conn:
             cursor = conn.cursor()
@@ -1214,49 +1283,73 @@ class Database:
             price_b = row_b["price"]
             actual_name_b = row_b["player_name"]
 
-            # Per IPL rules: Each player's salary affects their NEW team's cap
-            # Team A: loses player_a's salary, gains player_b's salary
-            # Team B: loses player_b's salary, gains player_a's salary
+            # Per IPL swap rules:
+            # - The price DIFFERENCE is transferred from team getting higher-valued player
+            # - NO refund of original prices
+            # - Players keep their original prices in new teams
+            #
+            # Example: Bumrah (18cr MI) ↔ Khaleel (4.8cr CSK)
+            # Difference = 18 - 4.8 = 13.2cr
+            # MI gets +13.2cr, CSK pays -13.2cr
 
-            # Check if teams can afford the incoming player's salary
+            # Calculate price difference
+            price_difference = abs(price_a - price_b)
+
+            # Determine which team pays the difference
+            # Team getting higher-valued player pays the difference
+            if price_a > price_b:
+                # Team B gets higher-valued player A, so B pays difference to A
+                team_paying_diff = team_b
+                team_receiving_diff = team_a
+            else:
+                # Team A gets higher-valued player B, so A pays difference to B
+                team_paying_diff = team_a
+                team_receiving_diff = team_b
+
+            # Check purses
             cursor.execute("SELECT purse FROM teams WHERE team_code = ?", (team_a,))
             purse_a = cursor.fetchone()["purse"]
 
             cursor.execute("SELECT purse FROM teams WHERE team_code = ?", (team_b,))
             purse_b = cursor.fetchone()["purse"]
 
-            # Net change for team A = +price_a (refund) - price_b (new salary)
-            # Net change for team B = +price_b (refund) - price_a (new salary)
-            net_change_a = price_a - price_b
-            net_change_b = price_b - price_a
+            # Calculate total changes for each team
+            # Only price difference + compensation affects purses
+            change_a = 0
+            change_b = 0
 
-            # Also account for compensation in affordability check
-            comp_change_a = 0
-            comp_change_b = 0
+            # Add price difference changes
+            if price_a > price_b:
+                # B pays difference to A
+                change_a = price_difference
+                change_b = -price_difference
+            elif price_b > price_a:
+                # A pays difference to B
+                change_a = -price_difference
+                change_b = price_difference
+            # If equal, no price difference transfer
+
+            # Add compensation changes
             if compensation_amount > 0 and compensation_from:
                 if compensation_from.upper() == team_a:
-                    comp_change_a = -compensation_amount  # A pays
-                    comp_change_b = compensation_amount  # B receives
+                    change_a -= compensation_amount  # A pays
+                    change_b += compensation_amount  # B receives
                 else:
-                    comp_change_a = compensation_amount  # A receives
-                    comp_change_b = -compensation_amount  # B pays
+                    change_a += compensation_amount  # A receives
+                    change_b -= compensation_amount  # B pays
 
-            # Total change including compensation
-            total_change_a = net_change_a + comp_change_a
-            total_change_b = net_change_b + comp_change_b
-
-            # Check if team A can afford (current purse + total change >= 0)
-            if purse_a + total_change_a < 0:
+            # Check if team A can afford
+            if purse_a + change_a < 0:
                 return (
                     False,
-                    f"{team_a} cannot afford this swap. Would need ₹{abs(purse_a + total_change_a):,} more.",
+                    f"{team_a} cannot afford this swap. Would need ₹{abs(purse_a + change_a):,} more.",
                 )
 
             # Check if team B can afford
-            if purse_b + total_change_b < 0:
+            if purse_b + change_b < 0:
                 return (
                     False,
-                    f"{team_b} cannot afford this swap. Would need ₹{abs(purse_b + total_change_b):,} more.",
+                    f"{team_b} cannot afford this swap. Would need ₹{abs(purse_b + change_b):,} more.",
                 )
 
             # Remove players from original teams
@@ -1269,26 +1362,18 @@ class Database:
                 (team_b, player_b),
             )
 
-            # Update purses based on salary cap rules
-            # Team A: refund player_a's salary, deduct player_b's salary
-            cursor.execute(
-                "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
-                (price_a, team_a),
-            )
-            cursor.execute(
-                "UPDATE teams SET purse = purse - ? WHERE team_code = ?",
-                (price_b, team_a),
-            )
-
-            # Team B: refund player_b's salary, deduct player_a's salary
-            cursor.execute(
-                "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
-                (price_b, team_b),
-            )
-            cursor.execute(
-                "UPDATE teams SET purse = purse - ? WHERE team_code = ?",
-                (price_a, team_b),
-            )
+            # Update purses - ONLY transfer the price difference (no original price refunds!)
+            if price_difference > 0:
+                # Team paying difference loses money
+                cursor.execute(
+                    "UPDATE teams SET purse = purse - ? WHERE team_code = ?",
+                    (price_difference, team_paying_diff),
+                )
+                # Team receiving difference gains money
+                cursor.execute(
+                    "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
+                    (price_difference, team_receiving_diff),
+                )
 
             # Add players to new teams (keeping their original salaries)
             cursor.execute(
