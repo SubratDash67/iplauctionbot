@@ -1,3 +1,4 @@
+# database.py
 """
 Database Module - SQLite persistence layer
 Handles all data storage for auction state, bids, teams, and history
@@ -1465,7 +1466,7 @@ class Database:
                     SELECT 1 FROM team_squads ts 
                     WHERE LOWER(ts.player_name) = LOWER(pl.player_name)
                 )
-                ORDER BY pl.list_name, pl.player_name
+                ORDER BY pl.list_name, player_name
                 """
             )
             from_player_lists = [
@@ -1655,3 +1656,40 @@ class Database:
             )
 
             return True
+
+    # ==================== NEW: BASE PRICE MANAGEMENT ====================
+    def change_base_price_for_players(
+        self, player_names: List[str], new_price: int
+    ) -> Tuple[int, List[str]]:
+        """
+        Change base_price for a list of player names (case-insensitive exact match).
+        Returns (updated_count, not_found_list)
+        """
+        updated = 0
+        not_found = []
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            for name in player_names:
+                cursor.execute(
+                    "UPDATE player_lists SET base_price = ? WHERE LOWER(player_name) = LOWER(?)",
+                    (new_price, name),
+                )
+                if cursor.rowcount == 0:
+                    # Could be that player is in sales (RELEASED/UNSOLD) and not in player_lists
+                    not_found.append(name)
+                else:
+                    updated += cursor.rowcount
+        return updated, not_found
+
+    def change_base_price_for_list(self, list_name: str, new_price: int) -> int:
+        """
+        Change base_price for all players in a given list_name (case-insensitive).
+        Returns number of rows updated.
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE player_lists SET base_price = ? WHERE LOWER(list_name) = LOWER(?)",
+                (new_price, list_name),
+            )
+            return cursor.rowcount

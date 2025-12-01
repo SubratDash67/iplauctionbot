@@ -1,0 +1,1137 @@
+{
+  "timestamp": "2025-12-01T14:56:20.182673",
+  "teams": {
+    "MI": 262500000,
+    "CSK": 199000000,
+    "RCB": 164000000,
+    "KKR": 96000000,
+    "SRH": 255000000,
+    "RR": 160500000,
+    "DC": 218000000,
+    "PBKS": 115000000,
+    "GT": 129000000,
+    "LSG": 229500000
+  },
+  "squads": {
+    "CSK": [
+      [
+        "Anshul Kamboj",
+        34000000
+      ],
+      [
+        "Ayush Mhatre",
+        3000000
+      ],
+      [
+        "Dewald Brevis",
+        22000000
+      ],
+      [
+        "Gurjapneet Singh",
+        22000000
+      ],
+      [
+        "Jamie Overton",
+        15000000
+      ],
+      [
+        "Mukesh Choudhary",
+        3000000
+      ],
+      [
+        "Nathan Ellis",
+        20000000
+      ],
+      [
+        "Noor Ahmad",
+        100000000
+      ],
+      [
+        "Ramakrishna Ghosh",
+        3000000
+      ],
+      [
+        "Ruturaj Gaikwad",
+        180000000
+      ],
+      [
+        "Sanju Samson",
+        180000000
+      ],
+      [
+        "Shreyas Gopal",
+        3000000
+      ],
+      [
+        "Urvil Patel",
+        3000000
+      ],
+      [
+        "Jasprit Bumrah",
+        180000000
+      ],
+      [
+        "Rohit Sharma",
+        163000000
+      ]
+    ],
+    "DC": [
+      [
+        "Abhishek Porel",
+        40000000
+      ],
+      [
+        "Ajay Mandal",
+        3000000
+      ],
+      [
+        "Ashutosh Sharma",
+        38000000
+      ],
+      [
+        "Axar Patel",
+        165000000
+      ],
+      [
+        "Dushmantha Chameera",
+        7500000
+      ],
+      [
+        "Karun Nair",
+        5000000
+      ],
+      [
+        "KL Rahul",
+        140000000
+      ],
+      [
+        "Kuldeep Yadav",
+        132500000
+      ],
+      [
+        "Madhav Tiwari",
+        4000000
+      ],
+      [
+        "Mukesh Kumar",
+        80000000
+      ],
+      [
+        "Nitish Rana",
+        42000000
+      ],
+      [
+        "Sameer Rizvi",
+        9500000
+      ],
+      [
+        "T. Natarajan",
+        107500000
+      ],
+      [
+        "Tripurana Vijay",
+        3000000
+      ],
+      [
+        "Tristan Stubbs",
+        100000000
+      ],
+      [
+        "Vipraj Nigam",
+        5000000
+      ],
+      [
+        "Mitchell Starc",
+        117500000
+      ]
+    ],
+    "GT": [
+      [
+        "Anuj Rawat",
+        3000000
+      ],
+      [
+        "Glenn Phillips",
+        20000000
+      ],
+      [
+        "Gurnoor Singh Brar",
+        13000000
+      ],
+      [
+        "Ishant Sharma",
+        7500000
+      ],
+      [
+        "Jayant Yadav",
+        7500000
+      ],
+      [
+        "Jos Buttler",
+        157500000
+      ],
+      [
+        "Kagiso Rabada",
+        107500000
+      ],
+      [
+        "Kumar Kushagra",
+        6500000
+      ],
+      [
+        "Manav Suthar",
+        3000000
+      ],
+      [
+        "Mohammad Siraj",
+        122500000
+      ],
+      [
+        "Mohd. Arshad Khan",
+        13000000
+      ],
+      [
+        "Nishant Sindhu",
+        3000000
+      ],
+      [
+        "Prasidh Krishna",
+        95000000
+      ],
+      [
+        "R. Sai Kishore",
+        20000000
+      ],
+      [
+        "Rahul Tewatia",
+        40000000
+      ],
+      [
+        "Rashid Khan",
+        180000000
+      ],
+      [
+        "Sai Sudharsan",
+        85000000
+      ],
+      [
+        "Shahrukh Khan",
+        40000000
+      ],
+      [
+        "Shubman Gill",
+        165000000
+      ],
+      [
+        "Washington Sundar",
+        32000000
+      ]
+    ],
+    "KKR": [
+      [
+        "Ajinkya Rahane",
+        15000000
+      ],
+      [
+        "Angkrish Raghuvanshi",
+        30000000
+      ],
+      [
+        "Anukul Roy",
+        4000000
+      ],
+      [
+        "Harshit Rana",
+        40000000
+      ],
+      [
+        "Manish Pandey",
+        7500000
+      ],
+      [
+        "Ramandeep Singh",
+        40000000
+      ],
+      [
+        "Rinku Singh",
+        130000000
+      ],
+      [
+        "Rovman Powell",
+        15000000
+      ],
+      [
+        "Sunil Narine",
+        120000000
+      ],
+      [
+        "Umran Malik",
+        7500000
+      ],
+      [
+        "Vaibhav Arora",
+        18000000
+      ],
+      [
+        "Varun Chakaravarthy",
+        120000000
+      ]
+    ],
+    "LSG": [
+      [
+        "Abdul Samad",
+        42000000
+      ],
+      [
+        "Aiden Markram",
+        20000000
+      ],
+      [
+        "Akash Singh",
+        3000000
+      ],
+      [
+        "Arjun Tendulkar",
+        3000000
+      ],
+      [
+        "Arshin Kulkarni",
+        3000000
+      ],
+      [
+        "Avesh Khan",
+        97500000
+      ],
+      [
+        "Ayush Badoni",
+        40000000
+      ],
+      [
+        "Digvesh Rathi",
+        3000000
+      ],
+      [
+        "Himmat Singh",
+        3000000
+      ],
+      [
+        "Manimaran Siddharth",
+        7500000
+      ],
+      [
+        "Matthew Breetzke",
+        7500000
+      ],
+      [
+        "Mayank Yadav",
+        110000000
+      ],
+      [
+        "Md Shami",
+        100000000
+      ],
+      [
+        "Mitchell Marsh",
+        34000000
+      ],
+      [
+        "Mohsin Khan",
+        40000000
+      ],
+      [
+        "Nicholas Pooran",
+        210000000
+      ],
+      [
+        "Prince Yadav",
+        3000000
+      ],
+      [
+        "Rishabh Pant",
+        270000000
+      ],
+      [
+        "Shahbaz Ahmed",
+        24000000
+      ]
+    ],
+    "MI": [
+      [
+        "Allah Ghazanfar",
+        48000000
+      ],
+      [
+        "Ashwani Kumar",
+        3000000
+      ],
+      [
+        "Corbin Bosch",
+        7500000
+      ],
+      [
+        "Deepak Chahar",
+        92500000
+      ],
+      [
+        "Hardik Pandya",
+        163500000
+      ],
+      [
+        "Mayank Markande",
+        3000000
+      ],
+      [
+        "Mitchell Santner",
+        20000000
+      ],
+      [
+        "Naman Dhir",
+        52500000
+      ],
+      [
+        "Raghu Sharma",
+        3000000
+      ],
+      [
+        "Raj Angad Bawa",
+        3000000
+      ],
+      [
+        "Robin Minz",
+        6500000
+      ],
+      [
+        "Ryan Rickelton",
+        10000000
+      ],
+      [
+        "Shardul Thakur",
+        20000000
+      ],
+      [
+        "Sherfane Rutherford",
+        26000000
+      ],
+      [
+        "Tilak Varma",
+        80000000
+      ],
+      [
+        "Trent Boult",
+        125000000
+      ],
+      [
+        "Will Jacks",
+        52500000
+      ],
+      [
+        "Suryakumar Yadav",
+        163500000
+      ],
+      [
+        "Syed Khaleel Ahmed",
+        48000000
+      ],
+      [
+        "MS Dhoni",
+        40000000
+      ],
+      [
+        "Shivam Dube",
+        20000000
+      ]
+    ],
+    "PBKS": [
+      [
+        "Arshdeep Singh",
+        180000000
+      ],
+      [
+        "Azmatullah Omarzai",
+        24000000
+      ],
+      [
+        "Harnoor Pannu",
+        3000000
+      ],
+      [
+        "Harpreet Brar",
+        15000000
+      ],
+      [
+        "Lockie Ferguson",
+        20000000
+      ],
+      [
+        "Marco Jansen",
+        70000000
+      ],
+      [
+        "Marcus Stoinis",
+        110000000
+      ],
+      [
+        "Mitch Owen",
+        30000000
+      ],
+      [
+        "Musheer Khan",
+        3000000
+      ],
+      [
+        "Nehal Wadhera",
+        42000000
+      ],
+      [
+        "Prabhsimran Singh",
+        40000000
+      ],
+      [
+        "Priyansh Arya",
+        38000000
+      ],
+      [
+        "Pyla Avinash",
+        3000000
+      ],
+      [
+        "Shashank Singh",
+        55000000
+      ],
+      [
+        "Shreyas Iyer",
+        267500000
+      ],
+      [
+        "Suryansh Shedge",
+        3000000
+      ],
+      [
+        "Vishnu Vinod",
+        9500000
+      ],
+      [
+        "Vyshak Vijaykumar",
+        18000000
+      ],
+      [
+        "Xavier Bartlett",
+        8000000
+      ],
+      [
+        "Yash Thakur",
+        16000000
+      ],
+      [
+        "Yuzvendra Chahal",
+        180000000
+      ]
+    ],
+    "RCB": [
+      [
+        "Abhinandan Singh",
+        3000000
+      ],
+      [
+        "Bhuvneshwar Kumar",
+        107500000
+      ],
+      [
+        "Devdutt Padikkal",
+        20000000
+      ],
+      [
+        "Jacob Bethell",
+        26000000
+      ],
+      [
+        "Jitesh Sharma",
+        110000000
+      ],
+      [
+        "Josh Hazlewood",
+        125000000
+      ],
+      [
+        "Krunal Pandya",
+        57500000
+      ],
+      [
+        "Nuwan Thushara",
+        16000000
+      ],
+      [
+        "Phil Salt",
+        115000000
+      ],
+      [
+        "Rajat Patidar",
+        110000000
+      ],
+      [
+        "Rasikh Dar",
+        60000000
+      ],
+      [
+        "Romario Shepherd",
+        15000000
+      ],
+      [
+        "Suyash Sharma",
+        26000000
+      ],
+      [
+        "Swapnil Singh",
+        5000000
+      ],
+      [
+        "Tim David",
+        30000000
+      ],
+      [
+        "Virat Kohli",
+        210000000
+      ],
+      [
+        "Yash Dayal",
+        50000000
+      ]
+    ],
+    "RR": [
+      [
+        "Dhruv Jurel",
+        140000000
+      ],
+      [
+        "Donovan Ferreira",
+        10000000
+      ],
+      [
+        "Jofra Archer",
+        125000000
+      ],
+      [
+        "Kwena Maphaka",
+        15000000
+      ],
+      [
+        "Lhuan-Dre Pretorious",
+        3000000
+      ],
+      [
+        "Nandre Burger",
+        35000000
+      ],
+      [
+        "Ravindra Jadeja",
+        140000000
+      ],
+      [
+        "Riyan Parag",
+        140000000
+      ],
+      [
+        "Sam Curran",
+        24000000
+      ],
+      [
+        "Sandeep Sharma",
+        40000000
+      ],
+      [
+        "Shimron Hetmyer",
+        110000000
+      ],
+      [
+        "Shubham Dubey",
+        8000000
+      ],
+      [
+        "Tushar Deshpande",
+        65000000
+      ],
+      [
+        "Vaibhav Suryavanshi",
+        11000000
+      ],
+      [
+        "Yashaswi Jaiswal",
+        180000000
+      ],
+      [
+        "Yudhvir Charak",
+        3500000
+      ]
+    ],
+    "SRH": [
+      [
+        "Abhishek Sharma",
+        140000000
+      ],
+      [
+        "Aniket Verma",
+        3000000
+      ],
+      [
+        "Brydon Carse",
+        10000000
+      ],
+      [
+        "Eshan Malinga",
+        12000000
+      ],
+      [
+        "Harsh Dubey",
+        3000000
+      ],
+      [
+        "Harshal Patel",
+        80000000
+      ],
+      [
+        "Heinrich Klaasen",
+        230000000
+      ],
+      [
+        "Ishan Kishan",
+        112500000
+      ],
+      [
+        "Jaydev Unadkat",
+        10000000
+      ],
+      [
+        "Kamindu Mendis",
+        7500000
+      ],
+      [
+        "Nitish Kumar Reddy",
+        60000000
+      ],
+      [
+        "Pat Cummins",
+        180000000
+      ],
+      [
+        "Smaran Ravichandaran",
+        3000000
+      ],
+      [
+        "Travis Head",
+        140000000
+      ],
+      [
+        "Zeeshan Ansari",
+        4000000
+      ]
+    ]
+  },
+  "sales": [],
+  "player_lists": {
+    "ba1": [
+      {
+        "player_name": "Devon Conway",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Jake Fraser-Mcgurk",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Prithvi Shaw",
+        "base_price": 7500000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Mayank Agarawal",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Faf Du Plessis",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "David Miller",
+        "base_price": 15000000,
+        "auctioned": false
+      }
+    ],
+    "wk1": [
+      {
+        "player_name": "Jonny Bairstow",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Quinton De Kock",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Rahmanullah Gurbaz",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Josh Inglis",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Jonny Bairstow",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Quinton De Kock",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Rahmanullah Gurbaz",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Josh Inglis",
+        "base_price": 20000000,
+        "auctioned": false
+      }
+    ],
+    "al1": [
+      {
+        "player_name": "Cameron Green",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Andre Russell",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Liam Livingstone",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Venkatesh Iyer",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Rachin Ravindra",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Daryl Mitchell",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Moeen Ali",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Aaron Hardie",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Matthew Short",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Michael Bracewell",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Glenn Maxwell",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Cameron Green",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Andre Russell",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Liam Livingstone",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Venkatesh Iyer",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Rachin Ravindra",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Daryl Mitchell",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Moeen Ali",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Aaron Hardie",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Matthew Short",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Michael Bracewell",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Glenn Maxwell",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Shane Watson",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Ravi Rampaul",
+        "base_price": 10000000,
+        "auctioned": false
+      }
+    ],
+    "sp1": [
+      {
+        "player_name": "Ravi Bishnoi",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Rahul Chahar",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Wanindu Hasaranga",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Waqar Salamkheil",
+        "base_price": 7500000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Maheesh Theekshana",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Adam Zampa",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Akeal Hosein",
+        "base_price": 15000000,
+        "auctioned": false
+      }
+    ],
+    "fa1": [
+      {
+        "player_name": "Matheesa Pathirana",
+        "base_price": 20000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Anrich Nortje",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Gerald Coetzee",
+        "base_price": 12500000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Akash Deep",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Spencer Johnson",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Matt Henry",
+        "base_price": 15000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Lungisani Ngidi",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Duffy",
+        "base_price": 10000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Akash Madhwal",
+        "base_price": 3000000,
+        "auctioned": false
+      }
+    ],
+    "uba1": [
+      {
+        "player_name": "Abhinav Manohar",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Salman Nizar",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Yash Dhull",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Anmolpreet Singh",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Atharva Taide",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Kartik Sharma",
+        "base_price": 3000000,
+        "auctioned": false
+      }
+    ],
+    "ual1": [
+      {
+        "player_name": "Mahipal Lomror",
+        "base_price": 5000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Vijay Shankar",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Utkarsh Singh",
+        "base_price": 3000000,
+        "auctioned": false
+      }
+    ],
+    "uwk1": [
+      {
+        "player_name": "Aryan Juyal",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Luvnith Sisodia",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Upendra Singh Yadav",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Vansh Bedi",
+        "base_price": 3000000,
+        "auctioned": false
+      }
+    ],
+    "ufa1": [
+      {
+        "player_name": "Mohit Sharma",
+        "base_price": 5000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Simarjeet Singh",
+        "base_price": 3000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Kartik Tyagi",
+        "base_price": 4000000,
+        "auctioned": false
+      }
+    ],
+    "usp1": [
+      {
+        "player_name": "Piyush Chawla",
+        "base_price": 5000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Karn Sharma",
+        "base_price": 5000000,
+        "auctioned": false
+      },
+      {
+        "player_name": "Kumar Kartikeya",
+        "base_price": 3000000,
+        "auctioned": false
+      }
+    ]
+  },
+  "list_order": [
+    "ba1",
+    "wk1",
+    "al1",
+    "sp1",
+    "fa1",
+    "uba1",
+    "ual1",
+    "uwk1",
+    "ufa1",
+    "usp1"
+  ],
+  "state": {
+    "active": false,
+    "paused": false,
+    "current_player": null,
+    "current_bid": 0,
+    "highest_bidder": null,
+    "base_price": 2000000
+  }
+}

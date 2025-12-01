@@ -1,3 +1,4 @@
+# auction_manager.py
 """
 Auction Manager Module - v2.1
 Handles all auction-related logic with atomic operations, auto-bid, and anti-sniping
@@ -1288,7 +1289,10 @@ class AuctionManager:
         # 4. Add to "released" list for re-auction (at the START of list order)
         released_list_name = "released"
         self.db.create_list(released_list_name)
-        self.db.add_player_to_list(released_list_name, p_name, salary)
+
+        # IMPORTANT: per request, set base price of released players to 2 Cr
+        two_cr = 2 * 10_000_000  # 2 Crore in rupees
+        self.db.add_player_to_list(released_list_name, p_name, two_cr)
 
         # Ensure "released" list is at the START of list order
         current_order = self.db.get_list_order()
@@ -1321,7 +1325,7 @@ class AuctionManager:
 
         return (
             True,
-            f'Released {p_name} from {team_upper}. Refunded {format_amount(salary)}. Player added to "Released" set (will appear first).',
+            f'Released {p_name} from {team_upper}. Refunded {format_amount(salary)}. Player added to "Released" set (will appear first). Base price set to 2Cr.',
         )
 
     # ==================== SALE FINALIZATION ====================
@@ -1451,7 +1455,7 @@ class AuctionManager:
         self.player_gap = seconds
 
     def _create_backup(self) -> str:
-        """Create a JSON backup of all auction data."""
+        """Create a JSON backup of all auction data.""" 
         import json
         from datetime import datetime
 
@@ -1673,6 +1677,134 @@ class AuctionManager:
             status += f"Auto-bids Active: {', '.join(auto_bids.keys())}\n"
 
         return status
+
+    # ==================== NEW: BASE PRICE CHANGE ====================
+    def change_base_price(self, players_arg: str, price_cr: float) -> Tuple[bool, str]:
+        """
+        Change base price for players.
+        players_arg: comma-separated player names OR the keyword 'released' to change all released players.
+        price_cr: price in Crores (float)
+        """
+        new_price = int(price_cr * 10_000_000)
+        players_arg = players_arg.strip()
+        if not players_arg:
+            return False, "Please provide player names or 'released'"
+
+        if players_arg.lower() == "released":
+            updated = self.db.change_base_price_for_list("released", new_price)
+            # Regenerate excel
+            try:
+                teams = self.db.get_teams()
+                squads = self.db.get_all_squads()
+                sales = self.db.get_all_sales()
+                unsold = self.db.get_unsold_players_for_excel()
+                released = self.db.get_released_players_for_excel()
+                trades = self.db.get_all_trades()
+
+                self.file_manager.regenerate_excel_from_db(
+                    self.excel_file, sales, teams, squads, unsold, released, trades
+                )
+            except Exception as e:
+                logger.error(f"Error updating Excel after change base price: {e}")
+
+            return True, f"Updated base price for {updated} players in RELEASED set to {format_amount(new_price)}"
+        else:
+            names = [n.strip() for n in players_arg.split(",") if n.strip()]
+            if not names:
+                return False, "No valid player names provided."
+
+            updated, not_found = self.db.change_base_price_for_players(names, new_price)
+
+            try:
+                teams = self.db.get_teams()
+                squads = self.db.get_all_squads()
+                sales = self.db.get_all_sales()
+                unsold = self.db.get_unsold_players_for_excel()
+                released = self.db.get_released_players_for_excel()
+                trades = self.db.get_all_trades()
+
+                self.file_manager.regenerate_excel_from_db(
+                    self.excel_file, sales, teams, squads, unsold, released, trades
+                )
+            except Exception as e:
+                logger.error(f"Error updating Excel after change base price: {e}")
+
+            msg = f"Updated base price for {updated} matching entries to {format_amount(new_price)}."
+            if not_found:
+                msg += f" Not found in player_lists: {', '.join(not_found)}"
+            return True, msg
+
+    # ==================== NEW: FIND PLAYER (SEARCH) ====================
+    def find_player(self, query: str) -> str:
+        """
+        Search across player_lists (unauctioned), team_squads, and sales for query substring (case-insensitive).
+        Returns a formatted string summarizing matches.
+        """
+        q = query.strip().lower()
+        if not q:
+            return "Please provide a player name to search."
+
+        results = []
+
+        # 1) Search unauctioned player_lists
+        all_lists = self.db.get_all_lists()
+        list_matches = []
+        for list_name, players in all_lists.items():
+            for p in players:
+                if q in p["player_name"].lower():
+                    price = p["base_price"]
+                    list_matches.append(
+                        (p["player_name"], list_name, price if price else None)
+                    )
+
+        # 2) Search squads
+        squads = self.db.get_all_squads()
+        squad_matches = []
+        for team, players in squads.items():
+            for pname, price in players:
+                if q in pname.lower():
+                    squad_matches.append((pname, team, price))
+
+        # 3) Search sales
+        sales = self.db.get_all_sales()
+        sales_matches = []
+        for s in sales:
+            pname = s.get("player_name", "")
+            if q in pname.lower():
+                sales_matches.append(
+                    (pname, s.get("team_code", ""), s.get("final_price", 0))
+                )
+
+        # Build message
+        msg = f"**Search results for '{query}':**\n\n"
+
+        if list_matches:
+            msg += "📋 Unauctioned Lists:\n```\n"
+            for pname, lname, price in list_matches:
+                price_str = format_amount(price) if price else "N/A"
+                msg += f"{pname:30} | Set: {lname.upper():8} | Base: {price_str}\n"
+            msg += "```\n"
+        else:
+            msg += "📋 Unauctioned Lists: None\n"
+
+        if squad_matches:
+            msg += "🟦 Squad (Owned Players):\n```\n"
+            for pname, team, price in squad_matches:
+                msg += f"{pname:30} | Team: {team:6} | Salary: {format_amount(price)}\n"
+            msg += "```\n"
+        else:
+            msg += "🟦 Squad (Owned Players): None\n"
+
+        if sales_matches:
+            msg += "🏷️ Sales / Released / Unsold:\n```\n"
+            for pname, tcode, price in sales_matches:
+                price_str = format_amount(price) if price else "N/A"
+                msg += f"{pname:30} | Team/Sale: {tcode:8} | Price: {price_str}\n"
+            msg += "```\n"
+        else:
+            msg += "🏷️ Sales / Released / Unsold: None\n"
+
+        return msg.strip()
 
 
 class AuctionState:
