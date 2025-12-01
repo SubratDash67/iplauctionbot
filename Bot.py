@@ -1,4 +1,4 @@
-```python name=Bot.py
+
 # Bot.py
 """
 Discord Auction Bot - Main Application
@@ -1142,7 +1142,671 @@ async def announce(
 
 
 # ============================================================
-# TRADE / SWAP CONFIRMATION VIEWS & COMMANDS (UPDATED TO SHOW PURSE EFFECT)
+# ADMIN SETTINGS COMMANDS
+# ============================================================
+
+
+@bot.tree.command(
+    name="setstatschannel",
+    description="Set channel for live stats updates (Admin only)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def set_stats_channel(
+    interaction: discord.Interaction, channel: discord.TextChannel
+):
+    bot.auction_manager.set_stats_channel(channel.id)
+    await interaction.response.send_message(
+        f"Stats channel set to {channel.mention}. I will start updating stats there."
+    )
+    await bot.update_stats_display()
+
+
+@bot.tree.command(
+    name="setcountdowngap",
+    description="Set gap between last bid and start of countdown (Admin only)",
+)
+@app_commands.describe(seconds="Gap duration in seconds")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_countdown_gap(interaction: discord.Interaction, seconds: int):
+    """Sets the delay between the last bid and when the countdown/timer logic starts."""
+    if seconds < 0:
+        await interaction.response.send_message(
+            "Gap cannot be negative.", ephemeral=True
+        )
+        return
+    bot.auction_manager.set_countdown_gap(seconds)
+    await interaction.response.send_message(
+        f"✅ Countdown gap set to **{seconds} seconds**. Timer will pause for {seconds}s after each bid."
+    )
+
+
+@bot.tree.command(
+    name="setpurse", description="Set a team's purse manually (Admin only)"
+)
+@app_commands.describe(team="Team abbreviation", amount="Purse amount in rupees")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_purse(interaction: discord.Interaction, team: str, amount: int):
+    team_validated = validate_team_name(team, bot.auction_manager.teams)
+    if not team_validated:
+        await interaction.response.send_message(
+            f"Invalid team name: **{team}**", ephemeral=True
+        )
+        return
+    if bot.auction_manager.set_team_purse(team_validated, amount):
+        await interaction.response.send_message(
+            f"Set **{team_validated}** purse to {format_amount(amount)}"
+        )
+    else:
+        await interaction.response.send_message("Invalid amount.", ephemeral=True)
+
+
+@bot.tree.command(
+    name="resetpurses",
+    description="Reset all team purses to configured values (Admin only)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def reset_purses(interaction: discord.Interaction):
+    from config import TEAMS
+
+    reset_count = 0
+    for team_code, purse in TEAMS.items():
+        if bot.auction_manager.set_team_purse(team_code, purse):
+            reset_count += 1
+
+    msg = f"**Reset {reset_count} team purses to configured values:**\n```\n"
+    for team, purse in sorted(TEAMS.items()):
+        msg += f"{team:6} : {format_amount(purse)}\n"
+    msg += "```"
+    await interaction.response.send_message(msg)
+
+
+# ============================================================
+# CLEAR CONFIRMATION VIEW
+# ============================================================
+
+
+class ClearConfirmView(discord.ui.View):
+    """Confirmation view for /clear command with backup option"""
+
+    def __init__(self, user_id: int):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.create_backup = False
+        self.confirmed = False
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(
+        label="Clear with Backup", style=discord.ButtonStyle.primary, emoji="💾"
+    )
+    async def backup_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
+            return
+        self.create_backup = True
+        self.confirmed = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(
+        label="Clear without Backup", style=discord.ButtonStyle.danger, emoji="🗑️"
+    )
+    async def no_backup_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
+            return
+        self.create_backup = False
+        self.confirmed = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This is not your confirmation!", ephemeral=True
+            )
+            return
+        self.confirmed = False
+        self.stop()
+        await interaction.response.defer()
+
+
+@bot.tree.command(
+    name="clear", description="Clear auction data/buys/released but keep retained data"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def clear_auction(interaction: discord.Interaction):
+    """Clears trade, released, and auction data but keeps retained players."""
+    # Show confirmation with backup option
+    view = ClearConfirmView(interaction.user.id)
+    await interaction.response.send_message(
+        "**⚠️ Clear Auction Data**\n\n"
+        "This will:\n"
+        "• Remove all auction buys, trades, and released players\n"
+        "• Reset team purses to config values\n"
+        "• Keep retained players\n"
+        "• Reset player lists for fresh loading\n\n"
+        "**Do you want to create a backup before clearing?**",
+        view=view,
+    )
+
+    await view.wait()
+
+    # Disable buttons after interaction
+    for item in view.children:
+        item.disabled = True
+
+    try:
+        await interaction.edit_original_response(view=view)
+    except:
+        pass
+
+    if not view.confirmed:
+        await interaction.followup.send("❌ Clear operation cancelled.", ephemeral=True)
+        return
+
+    # Remove duplicates first
+    duplicates_removed = bot.auction_manager.db.remove_duplicate_players()
+
+    # Call clear_all_data with backup option
+    backup_path = bot.auction_manager.clear_all_data(create_backup=view.create_backup)
+
+    await bot.cancel_countdown_task()
+
+    msg = "**✅ Auction data cleared!**\n"
+    msg += "• Auction buys, trades, and released players removed.\n"
+    msg += "• **Retained players preserved.**\n"
+    msg += "• Team purses reset to config values.\n"
+    msg += "• All players marked available for auction."
+
+    if backup_path:
+        msg += f"\n\n💾 Backup created: `{backup_path}`"
+    elif view.create_backup:
+        msg += "\n\n⚠️ Backup creation failed."
+    else:
+        msg += "\n\n📝 No backup created (as requested)."
+
+    if duplicates_removed > 0:
+        msg += f"\n🔧 Removed {duplicates_removed} duplicate player entries."
+
+    await interaction.followup.send(msg)
+
+
+@bot.tree.command(
+    name="setplayergap", description="Set gap between players in seconds (Admin only)"
+)
+@app_commands.describe(seconds="Gap in seconds between players (1-60)")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_player_gap(interaction: discord.Interaction, seconds: int):
+    if seconds < 1 or seconds > 60:
+        await interaction.response.send_message(
+            "Gap must be between 1 and 60 seconds.", ephemeral=True
+        )
+        return
+    bot.player_gap = seconds
+    bot.auction_manager.set_player_gap(seconds)
+    await interaction.response.send_message(
+        f"✅ Player gap set to **{seconds} seconds**"
+    )
+
+
+@bot.tree.command(
+    name="moveplayer", description="Move a player from one set to another (Admin only)"
+)
+@app_commands.describe(
+    player="Player name to move", target_set="Target set name (e.g., BA1, M1)"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def move_player(interaction: discord.Interaction, player: str, target_set: str):
+    success = bot.auction_manager.db.move_player_to_set(player, target_set)
+    if success:
+        await interaction.response.send_message(
+            f"✅ Moved **{player}** to set **{target_set.upper()}**"
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ Could not find player **{player}** in any set.", ephemeral=True
+        )
+
+
+@bot.tree.command(
+    name="fixduplicates",
+    description="Remove duplicate players from squads (Admin only)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def fix_duplicates(interaction: discord.Interaction):
+    removed = bot.auction_manager.db.remove_duplicate_players()
+    if removed > 0:
+        await interaction.response.send_message(
+            f"✅ Removed **{removed}** duplicate player entries from squads."
+        )
+    else:
+        await interaction.response.send_message(
+            "✅ No duplicate players found.", ephemeral=True
+        )
+
+
+# ============================================================
+# INFO COMMANDS
+# ============================================================
+
+
+@bot.tree.command(name="showpurse", description="Display current team purses")
+async def show_purse(interaction: discord.Interaction):
+    await interaction.response.send_message(bot.auction_manager.get_purse_display())
+
+
+@bot.tree.command(name="status", description="Show current auction status")
+async def show_status(interaction: discord.Interaction):
+    status = bot.auction_manager.get_status_display()
+    await interaction.response.send_message(status)
+
+
+@bot.tree.command(name="allsquads", description="View summary of all teams' squads")
+async def all_squads(interaction: discord.Interaction):
+    """View a summary of all teams - available to everyone"""
+    squads = bot.auction_manager.team_squads
+    teams_purse = bot.auction_manager.teams
+
+    msg = "**📋 All Teams Summary:**\n```\n"
+    msg += f"{'Team':<6} {'Players':>8} {'Spent':>12} {'Purse':>12}\n"
+    msg += "=" * 42 + "\n"
+
+    for team_code in sorted(teams_purse.keys()):
+        squad = squads.get(team_code, [])
+        player_count = len(squad)
+        total_spent = sum(price for _, price in squad)
+        purse = teams_purse.get(team_code, 0)
+
+        msg += f"{team_code:<6} {player_count:>8} {format_amount(total_spent):>12} {format_amount(purse):>12}\n"
+
+    msg += "```\n*Use `/squad <team>` to view detailed squad*"
+    await interaction.response.send_message(msg)
+
+
+@bot.tree.command(name="userhelp", description="Show commands for players/users")
+async def user_help_command(interaction: discord.Interaction):
+    help_text = """
+**Discord Auction Bot - User Commands**
+
+**My Team:**
+`/myteam` - Check which team you are assigned to.
+`/teamsquad` - View your team's current squad and purse.
+
+**Bidding:**
+`/bid` - Place a bid for the current player on behalf of your team.
+`/bidhistory` - View the most recent bids placed.
+`/teambids <team>` - View bid history for a specific team.
+
+**View Teams:**
+`/squad <team>` - View any team's detailed squad.
+`/allsquads` - View summary of all teams.
+`/showpurse` - See remaining purse for all teams.
+
+**Info:**
+`/status` - Check the current player and auction status.
+`/showlists` - View the upcoming player lists.
+"""
+    await interaction.response.send_message(help_text, ephemeral=True)
+
+
+@bot.tree.command(name="adminhelp", description="Show commands for Admins")
+@app_commands.checks.has_permissions(administrator=True)
+async def admin_help_command(interaction: discord.Interaction):
+    embed1 = discord.Embed(
+        title="🔧 Admin Commands - Auction Control", color=discord.Color.blue()
+    )
+    embed1.add_field(
+        name="Auction Control",
+        value=(
+            "`/start` - Start auction\n"
+            "`/stop` - Stop auction\n"
+            "`/pause` - Pause auction\n"
+            "`/resume` - Resume auction\n"
+            "`/soldto TEAM` - Sell to team\n"
+            "`/unsold` - Mark unsold\n"
+            "`/skip` - Skip player\n"
+            "`/skipset` - Skip entire set\n"
+            "`/undobid` - Undo last bid\n"
+            "`/rollback` - Undo last sale\n"
+            "`/clear` - Reset (Keep Retained)"
+        ),
+        inline=False,
+    )
+
+    embed2 = discord.Embed(
+        title="👥 Admin Commands - Team Management", color=discord.Color.green()
+    )
+    embed2.add_field(
+        name="Team & Player Management",
+        value=(
+            "`/assignteam @user TEAM` - Assign user\n"
+            "`/assignteams` - Bulk assign users\n"
+            "`/unassignteam @user` - Remove user\n"
+            "`/setpurse TEAM amount` - Set purse\n"
+            "`/addtosquad TEAM player price` - Add player\n"
+            "`/release TEAM player` - Release player\n"
+            "`/releasemultiple` - Bulk release\n"
+            "`/trade player from to price` - Trade player"
+        ),
+        inline=False,
+    )
+
+    embed3 = discord.Embed(
+        title="📋 Admin Commands - Lists & Settings", color=discord.Color.orange()
+    )
+    embed3.add_field(
+        name="Re-Auction & Data",
+        value=(
+            "`/loadretained` - Init/Reset Retained\n"
+            "`/showunsold` - View unsold/accelerated\n"
+            "`/showskipped` - View skipped players\n"
+            "`/reauction player` - Re-auction one\n"
+            "`/reauctionall` - Re-auction all\n"
+            "`/loadsets N` - Load next N sets\n"
+            "`/addplayer` - Add player"
+        ),
+        inline=True,
+    )
+    embed3.add_field(
+        name="Settings & Communication",
+        value=(
+            "`/setcountdowngap secs` - Bid-to-timer gap\n"
+            "`/setplayergap secs` - Player gap\n"
+            "`/setstatschannel #ch` - Stats channel\n"
+            "`/announce title msg` - Announcement"
+        ),
+        inline=False,
+    )
+
+    await interaction.response.send_message(
+        embeds=[embed1, embed2, embed3], ephemeral=True
+    )
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+
+async def start_next_player(channel: discord.TextChannel):
+    """Start auctioning the next player"""
+
+    if bot.auction_manager.paused:
+        return
+
+    await asyncio.sleep(bot.player_gap)
+
+    if bot.auction_manager.paused:
+        return
+
+    result = bot.auction_manager.get_next_player()
+    success, player_name, base_price, is_first_in_list = result
+
+    if not success:
+        current_list = bot.auction_manager.get_current_list_name()
+        if current_list:
+            await channel.send(f"**✅ Set {current_list.upper()} completed!**")
+            await asyncio.sleep(LIST_GAP)
+            await start_next_player(channel)
+        else:
+            bot.auction_manager.paused = True
+            bot.auction_manager._save_state_to_db()
+
+            unsold = bot.auction_manager.db.get_unsold_players()
+            await channel.send(
+                "**⚠️ All loaded sets have been completed.** Auction paused."
+            )
+            await channel.send(bot.auction_manager.get_purse_display())
+        return
+
+    current_set_name = bot.auction_manager.get_current_list_name()
+
+    if is_first_in_list:
+        set_embed = discord.Embed(
+            title=f"🎯 SET: {current_set_name.upper()}",
+            description=f"Starting players from **{current_set_name.upper()}**",
+            color=discord.Color.gold(),
+        )
+        await channel.send(embed=set_embed)
+        await asyncio.sleep(2)
+
+        if bot.auction_manager.current_list_index == 0:
+            delay = 5
+            await channel.send(
+                f"🚨 Auction starting! First bid window opens in **{delay} seconds**."
+            )
+        else:
+            delay = INITIAL_SET_DELAY
+            await channel.send(f"🚨 Bidding opens in **{delay} seconds**.")
+
+        await asyncio.sleep(delay)
+
+        msg = bot.formatter.format_player_announcement(player_name, base_price)
+        await channel.send(msg)
+        bot.auction_manager.reset_last_bid_time()
+    else:
+        announcement = bot.formatter.format_player_announcement(player_name, base_price)
+        await channel.send(announcement)
+        bot.auction_manager.reset_last_bid_time()
+
+    if not bot.countdown_task or bot.countdown_task.done():
+        bot.countdown_task = asyncio.create_task(countdown_loop(channel))
+
+
+async def countdown_loop(channel: discord.TextChannel):
+    """Manual bidding timer with gap support"""
+    import time as time_module
+    from config import NO_BID_TIMEOUT, NO_START_TIMEOUT, BIDDING_OPEN_WARNING_TIME
+
+    player_start_time = time_module.time()
+
+    if bot.auction_manager.last_bid_time <= 0:
+        bot.auction_manager.last_bid_time = player_start_time
+
+    last_msg = None
+    first_bid_placed = False
+    bidding_open_msg_sent = False
+    going_once_sent = False
+    going_twice_sent = False
+    going_thrice_sent = False
+    last_known_bid_time = bot.auction_manager.last_bid_time
+
+    while bot.auction_manager.active and not bot.auction_manager.paused:
+        await asyncio.sleep(1)
+
+        now = time_module.time()
+        bot.auction_manager._load_state_from_db()
+        current_player_name = bot.auction_manager.current_player
+
+        # Dynamic Gap
+        countdown_gap = getattr(bot.auction_manager, "countdown_gap", 0)
+
+        current_bid_time = bot.auction_manager.last_bid_time
+        if bot.auction_manager.highest_bidder is not None:
+            if not first_bid_placed:
+                first_bid_placed = True
+                last_known_bid_time = current_bid_time
+                going_once_sent = False
+                going_twice_sent = False
+                going_thrice_sent = False
+            elif current_bid_time > last_known_bid_time:
+                last_known_bid_time = current_bid_time
+                going_once_sent = False
+                going_twice_sent = False
+                going_thrice_sent = False
+
+        if not first_bid_placed:
+            elapsed_since_start = now - player_start_time
+            remaining = NO_START_TIMEOUT - int(elapsed_since_start)
+
+            if (
+                elapsed_since_start >= BIDDING_OPEN_WARNING_TIME
+                and not bidding_open_msg_sent
+            ):
+                bidding_open_msg_sent = True
+                await channel.send(
+                    f"📣 **BIDDING OPEN!** Waiting for first bid on **{current_player_name}**..."
+                )
+
+            if remaining <= 30 and remaining > 20 and not going_once_sent:
+                going_once_sent = True
+                await channel.send(
+                    f"⏳ **{current_player_name}** going **UNSOLD** in **30 seconds**... Place your bids!"
+                )
+            if remaining <= 20 and remaining > 10 and not going_twice_sent:
+                going_twice_sent = True
+                await channel.send(
+                    f"⚠️ **{current_player_name}** going **UNSOLD** in **20 seconds**!"
+                )
+            if remaining <= 10 and remaining > 0 and not going_thrice_sent:
+                going_thrice_sent = True
+                await channel.send(
+                    f"🚨 **LAST CHANCE!** **{current_player_name}** going **UNSOLD** in **10 seconds**!"
+                )
+
+            if remaining <= 0:
+                if last_msg:
+                    try:
+                        await last_msg.delete()
+                    except (discord.NotFound, discord.HTTPException):
+                        pass
+
+                if not current_player_name:
+                    await asyncio.sleep(2)
+                    await start_next_player(channel)
+                    return
+
+                success, team, amount = await bot.auction_manager.finalize_sale()
+
+                if success and team == "UNSOLD":
+                    sold_msg = bot.formatter.format_sold_message(
+                        current_player_name, team, amount
+                    )
+                    await channel.send(sold_msg)
+                else:
+                    await channel.send(
+                        f"⏰ No bids received - Player **{current_player_name}** goes **UNSOLD**"
+                    )
+
+                await asyncio.sleep(2)
+                await start_next_player(channel)
+                return
+
+        else:
+            # Bid placed - apply gap
+            elapsed_since_last_bid = now - bot.auction_manager.last_bid_time
+
+            # Subtract GAP from elapsed time.
+            # E.g. Gap=5, Elapsed=3 -> Effective=-2 (Waiting)
+            # Gap=5, Elapsed=6 -> Effective=1 (Countdown active)
+            effective_elapsed = elapsed_since_last_bid - countdown_gap
+
+            if effective_elapsed < 0:
+                # Still in gap period, silent wait
+                continue
+
+            remaining = NO_BID_TIMEOUT - int(effective_elapsed)
+
+            current_bid = bot.auction_manager.current_bid
+            current_team = bot.auction_manager.highest_bidder
+
+            if remaining <= 12 and remaining > 8 and not going_once_sent:
+                going_once_sent = True
+                await channel.send(
+                    f"🔔 **GOING ONCE!** {format_amount(current_bid)} to **{current_team}**!"
+                )
+
+            if remaining <= 8 and remaining > 4 and not going_twice_sent:
+                going_twice_sent = True
+                await channel.send(
+                    f"🔔🔔 **GOING TWICE!** {format_amount(current_bid)} to **{current_team}**!"
+                )
+
+            if remaining <= 4 and remaining > 0 and not going_thrice_sent:
+                going_thrice_sent = True
+                await channel.send(
+                    f"🔔🔔🔔 **GOING THRICE!** Last chance! {format_amount(current_bid)} to **{current_team}**!"
+                )
+
+            if remaining <= 0:
+                if last_msg:
+                    try:
+                        await last_msg.delete()
+                    except (discord.NotFound, discord.HTTPException):
+                        pass
+
+                player_name = bot.auction_manager.current_player
+
+                if not player_name:
+                    await asyncio.sleep(2)
+                    await start_next_player(channel)
+                    return
+
+                squads = bot.auction_manager.db.get_all_squads()
+                player_already_sold = False
+                for squad in squads.values():
+                    for pname, _ in squad:
+                        if pname.lower() == player_name.lower():
+                            player_already_sold = True
+                            break
+                    if player_already_sold:
+                        break
+
+                if player_already_sold:
+                    bot.auction_manager._reset_player_state()
+                    bot.auction_manager._save_state_to_db()
+                    await asyncio.sleep(2)
+                    await start_next_player(channel)
+                    return
+
+                success, team, amount = await bot.auction_manager.finalize_sale()
+
+                if success and team and team != "UNSOLD":
+                    sold_msg = bot.formatter.format_sold_message(
+                        player_name, team, amount
+                    )
+                    await channel.send(sold_msg)
+                    await channel.send(bot.auction_manager.get_purse_display())
+                    bot.create_background_task(bot.update_stats_display())
+                elif success and team == "UNSOLD":
+                    sold_msg = bot.formatter.format_sold_message(
+                        player_name, team, amount
+                    )
+                    await channel.send(sold_msg)
+                else:
+                    await channel.send(
+                        f"⚠️ Error finalizing sale for **{player_name}**. Moving to next player."
+                    )
+
+                await asyncio.sleep(2)
+                await start_next_player(channel)
+                return
+
+        if bot.auction_manager.paused:
+            if last_msg:
+                try:
+                    await last_msg.delete()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+            break
+
+
+# ============================================================
+# TRADE / SWAP CONFIRMATION VIEWS & COMMANDS
 # ============================================================
 
 
@@ -1153,7 +1817,7 @@ class TradeConfirmView(discord.ui.View):
         player: str,
         from_team: str,
         to_team: str,
-        price_cr: float,
+        price: float,
         user_id: int,
     ):
         super().__init__(timeout=60)
@@ -1161,7 +1825,7 @@ class TradeConfirmView(discord.ui.View):
         self.player = player
         self.from_team = from_team.upper()
         self.to_team = to_team.upper()
-        self.price_cr = price_cr  # Crores float
+        self.price = price
         self.user_id = user_id
         self.message: Optional[discord.Message] = None
 
@@ -1180,37 +1844,10 @@ class TradeConfirmView(discord.ui.View):
             await interaction.response.send_message("This is not your confirmation!", ephemeral=True)
             return
 
-        # Re-check purses and player existence right before executing
-        teams = self.bot_ref.auction_manager.db.get_teams()
-        from_purse = teams.get(self.from_team, 0)
-        to_purse = teams.get(self.to_team, 0)
-        price_rupees = int(self.price_cr * 10_000_000)
-
-        # Check player exists in from_team and get its recorded salary (if any)
-        seller_salary = self.bot_ref.auction_manager.db.get_player_price_in_squad(self.from_team, self.player) or 0
-
-        # For cash trades: buyer pays the trade price, seller receives it.
-        projected_from = from_purse + price_rupees
-        projected_to = to_purse - price_rupees
-
-        if projected_to < 0:
-            await interaction.response.send_message(
-                f"Cannot perform trade: {self.to_team} would have negative purse ({format_amount(projected_to)}).", ephemeral=True
-            )
-            # disable buttons
-            for item in self.children:
-                item.disabled = True
-            try:
-                await interaction.edit_original_response(view=self)
-            except Exception:
-                pass
-            return
-
-        # Execute trade via auction manager (it handles DB changes + excel update)
+        # Perform the trade
         success, msg = self.bot_ref.auction_manager.trade_player(
-            self.player, self.from_team, self.to_team, self.price_cr
+            self.player, self.from_team, self.to_team, self.price
         )
-
         # Disable buttons and update message
         for item in self.children:
             item.disabled = True
@@ -1220,6 +1857,7 @@ class TradeConfirmView(discord.ui.View):
         except Exception:
             await interaction.response.send_message(msg)
 
+        # Update stats and trade log if success
         if success:
             self.bot_ref.create_background_task(self.bot_ref.update_stats_display())
             self.bot_ref.create_background_task(update_trade_log())
@@ -1246,9 +1884,8 @@ class SwapConfirmView(discord.ui.View):
         team_a: str,
         player_b: str,
         team_b: str,
-        compensation_cr: float,
-        comp_rupees: int,
-        compensation_from: Optional[str],
+        compensation: float,
+        compensation_from: str,
         user_id: int,
     ):
         super().__init__(timeout=60)
@@ -1257,9 +1894,8 @@ class SwapConfirmView(discord.ui.View):
         self.team_a = team_a.upper()
         self.player_b = player_b
         self.team_b = team_b.upper()
-        self.compensation_cr = compensation_cr  # float in crores
-        self.comp_rupees = comp_rupees  # int rupees for display
-        self.compensation_from = compensation_from  # already uppercased or None
+        self.compensation = compensation
+        self.compensation_from = compensation_from
         self.user_id = user_id
         self.message: Optional[discord.Message] = None
 
@@ -1278,62 +1914,13 @@ class SwapConfirmView(discord.ui.View):
             await interaction.response.send_message("This is not your confirmation!", ephemeral=True)
             return
 
-        # Re-check projected purses and affordability before executing
-        teams = self.bot_ref.auction_manager.db.get_teams()
-        purse_a = teams.get(self.team_a, 0)
-        purse_b = teams.get(self.team_b, 0)
-
-        # Get current salaries
-        price_a = self.bot_ref.auction_manager.db.get_player_price_in_squad(self.team_a, self.player_a) or 0
-        price_b = self.bot_ref.auction_manager.db.get_player_price_in_squad(self.team_b, self.player_b) or 0
-
-        # Salary refund/deduct logic: net_change = refund_out - incoming_salary
-        proj_a = purse_a + price_a - price_b
-        proj_b = purse_b + price_b - price_a
-
-        # Apply compensation if provided
-        if self.comp_rupees > 0 and self.compensation_from:
-            payer = self.compensation_from.strip().upper()
-            if payer == "A":
-                payer_team = self.team_a
-            elif payer == "B":
-                payer_team = self.team_b
-            else:
-                payer_team = payer
-
-            if payer_team not in (self.team_a, self.team_b):
-                await interaction.response.send_message("Invalid compensation payer. Use A, B or a team code.", ephemeral=True)
-                return
-
-            if payer_team == self.team_a:
-                proj_a -= self.comp_rupees
-                proj_b += self.comp_rupees
-            else:
-                proj_a += self.comp_rupees
-                proj_b -= self.comp_rupees
-
-        # Final affordability check
-        if proj_a < 0 or proj_b < 0:
-            await interaction.response.send_message(
-                f"Cannot perform swap: resulting purses would be negative. Projected {self.team_a}: {format_amount(proj_a)}, {self.team_b}: {format_amount(proj_b)}",
-                ephemeral=True,
-            )
-            for item in self.children:
-                item.disabled = True
-            try:
-                await interaction.edit_original_response(view=self)
-            except Exception:
-                pass
-            return
-
-        # Execute swap via auction manager (pass compensation in crores)
         success, msg = self.bot_ref.auction_manager.swap_players(
             self.player_a,
             self.team_a,
             self.player_b,
             self.team_b,
-            self.compensation_cr,
-            (self.compensation_from if self.compensation_from else None),
+            self.compensation,
+            self.compensation_from,
         )
 
         for item in self.children:
@@ -1379,48 +1966,24 @@ async def trade(
     to_team: str,
     price: float,
 ):
-    # Build confirmation showing purses and the actual effect (buyer pays, seller receives)
+    # Build confirmation showing purses
     await interaction.response.defer(ephemeral=True)
 
     teams = bot.auction_manager.db.get_teams()
-    from_code = from_team.upper()
-    to_code = to_team.upper()
-
-    if from_code not in teams or to_code not in teams:
-        await interaction.followup.send("One or both team codes are invalid.", ephemeral=True)
-        return
-
-    from_purse = teams.get(from_code, 0)
-    to_purse = teams.get(to_code, 0)
+    from_purse = teams.get(from_team.upper(), 0)
+    to_purse = teams.get(to_team.upper(), 0)
     price_rupees = int(price * 10_000_000)
-
-    # Get seller's recorded salary (for display) if present
-    seller_salary = bot.auction_manager.db.get_player_price_in_squad(from_code, player) or 0
-
-    # Projected purses after cash trade (buyer pays price, seller receives price)
-    proj_from = from_purse + price_rupees
-    proj_to = to_purse - price_rupees
 
     embed = discord.Embed(
         title="Confirm Cash Trade",
-        description=f"Trade **{player}** from **{from_code}** → **{to_code}** for **{format_amount(price_rupees)}**",
+        description=f"Trade **{player}** from **{from_team.upper()}** → **{to_team.upper()}** for **{format_amount(price_rupees)}**",
         color=discord.Color.orange(),
     )
-    embed.add_field(name=f"{from_code} Purse (current)", value=f"{format_amount(from_purse)}", inline=True)
-    embed.add_field(name=f"{to_code} Purse (current)", value=f"{format_amount(to_purse)}", inline=True)
-    embed.add_field(
-        name="Projected purses after trade (buyer pays → seller receives)",
-        value=f"{from_code}: {format_amount(proj_from)}\n{to_code}: {format_amount(proj_to)}",
-        inline=False,
-    )
-    embed.add_field(
-        name="Player salary details",
-        value=f"Current recorded salary (seller side): {format_amount(seller_salary)}\nSalary after trade (buyer side): {format_amount(price_rupees)}",
-        inline=False,
-    )
+    embed.add_field(name=f"{from_team.upper()} Purse", value=f"{format_amount(from_purse)}", inline=True)
+    embed.add_field(name=f"{to_team.upper()} Purse", value=f"{format_amount(to_purse)}", inline=True)
     embed.set_footer(text="Confirm to execute the trade. This action is logged.")
 
-    view = TradeConfirmView(bot, player, from_code, to_code, price, interaction.user.id)
+    view = TradeConfirmView(bot, player, from_team, to_team, price, interaction.user.id)
     msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     view.message = msg
 
@@ -1449,92 +2012,22 @@ async def swaptrade(
     await interaction.response.defer(ephemeral=True)
 
     teams = bot.auction_manager.db.get_teams()
-    team_a_code = team_a.upper()
-    team_b_code = team_b.upper()
-
-    if team_a_code not in teams or team_b_code not in teams:
-        await interaction.followup.send("One or both team codes are invalid.", ephemeral=True)
-        return
-
-    purse_a = teams.get(team_a_code, 0)
-    purse_b = teams.get(team_b_code, 0)
-
-    # Get current salaries for both players
-    price_a = bot.auction_manager.db.get_player_price_in_squad(team_a_code, player_a) or 0
-    price_b = bot.auction_manager.db.get_player_price_in_squad(team_b_code, player_b) or 0
-
-    # Net salary effect (refund outgoing, deduct incoming)
-    proj_a = purse_a + price_a - price_b
-    proj_b = purse_b + price_b - price_a
-
+    purse_a = teams.get(team_a.upper(), 0)
+    purse_b = teams.get(team_b.upper(), 0)
     comp_rupees = int(compensation * 10_000_000) if compensation else 0
-
-    comp_note = "No compensation."
-    if comp_rupees > 0 and compensation_from:
-        # Normalize compensation_from safely (it may be string or other)
-        if isinstance(compensation_from, str):
-            payer = compensation_from.strip().upper()
-        else:
-            payer = str(compensation_from).strip().upper()
-
-        if payer == "A":
-            payer_team = team_a_code
-        elif payer == "B":
-            payer_team = team_b_code
-        else:
-            payer_team = payer
-
-        if payer_team not in (team_a_code, team_b_code):
-            await interaction.followup.send("Invalid compensation payer. Use A, B or a team code.", ephemeral=True)
-            return
-
-        # Apply compensation to projected purses only for preview
-        if payer_team == team_a_code:
-            proj_a -= comp_rupees
-            proj_b += comp_rupees
-        else:
-            proj_a += comp_rupees
-            proj_b -= comp_rupees
-
-        comp_note = f"Compensation {format_amount(comp_rupees)} paid by {payer_team}."
 
     embed = discord.Embed(
         title="Confirm Swap Trade",
-        description=f"Swap **{player_a}** ({team_a_code}) ↔ **{player_b}** ({team_b_code})",
+        description=f"Swap **{player_a}** ({team_a.upper()}) ↔ **{player_b}** ({team_b.upper()})",
         color=discord.Color.orange(),
     )
-    embed.add_field(name=f"{team_a_code} Purse (current)", value=f"{format_amount(purse_a)}", inline=True)
-    embed.add_field(name=f"{team_b_code} Purse (current)", value=f"{format_amount(purse_b)}", inline=True)
-    embed.add_field(
-        name="Projected after salary exchange (+/-) and compensation",
-        value=f"{team_a_code}: {format_amount(proj_a)}\n{team_b_code}: {format_amount(proj_b)}",
-        inline=False,
-    )
-    embed.add_field(
-        name="Salary details",
-        value=f"{player_a} salary: {format_amount(price_a)} (refund from {team_a_code})\n{player_b} salary: {format_amount(price_b)} (incoming to {team_a_code})",
-        inline=False,
-    )
+    embed.add_field(name=f"{team_a.upper()} Purse", value=f"{format_amount(purse_a)}", inline=True)
+    embed.add_field(name=f"{team_b.upper()} Purse", value=f"{format_amount(purse_b)}", inline=True)
     if comp_rupees > 0 and compensation_from:
         embed.add_field(name="Compensation", value=f"{format_amount(comp_rupees)} (paid by {compensation_from})", inline=False)
-    embed.set_footer(text="Confirm to execute the swap. Salaries move with players; only compensation moves cash between purses.")
+    embed.set_footer(text="Confirm to execute the swap. This action is logged.")
 
-    # Prepare compensation_from parameter safely for the view (uppercased if string)
-    comp_from_for_view = None
-    if compensation_from:
-        comp_from_for_view = compensation_from.strip().upper() if isinstance(compensation_from, str) else str(compensation_from).strip().upper()
-
-    view = SwapConfirmView(
-        bot,
-        player_a,
-        team_a_code,
-        player_b,
-        team_b_code,
-        compensation,  # crores float
-        comp_rupees,   # rupees int
-        comp_from_for_view,
-        interaction.user.id,
-    )
+    view = SwapConfirmView(bot, player_a, team_a, player_b, team_b, compensation, compensation_from, interaction.user.id)
     msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     view.message = msg
 
