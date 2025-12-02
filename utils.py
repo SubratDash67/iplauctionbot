@@ -954,8 +954,6 @@ class MessageFormatter:
         team_code: str,
         squad: List[Tuple[str, int, str, str]],
         purse: int,
-        overseas_slots: int,
-        total_slots: int,
     ) -> str:
         """Format a team's squad for display.
 
@@ -963,8 +961,6 @@ class MessageFormatter:
             team_code: The team code (e.g., 'MI', 'CSK')
             squad: List of (player, price, acq_type, source) tuples
             purse: Remaining purse amount
-            overseas_slots: Number of overseas slots
-            total_slots: Total slots available
 
         Returns:
             Formatted string for Discord display
@@ -1004,9 +1000,7 @@ class MessageFormatter:
         msg += f"\n{'='*50}\n"
         msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
         msg += f"{'Remaining Purse':30} : {format_amount(purse)}\n"
-        msg += f"{'Players':30} : {current_players}\n"
-        msg += f"{'Overseas Slots':30} : {overseas_slots}\n"
-        msg += f"{'Total Slots Available':30} : {total_slots}\n"
+        msg += f"{'Total Players':30} : {current_players}\n"
         msg += "```"
         return msg
 

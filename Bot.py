@@ -399,8 +399,6 @@ async def team_bid_history(
 @bot.tree.command(name="teamsquad", description="Show players in your team")
 async def team_squad(interaction: discord.Interaction):
     """Shows the squad for the user's assigned team"""
-    from config import TEAM_SLOTS
-
     user_id = interaction.user.id
     team_upper = bot.user_teams.get(user_id)
 
@@ -414,16 +412,10 @@ async def team_squad(interaction: discord.Interaction):
     detailed_squads = bot.auction_manager.db.get_all_squads_detailed()
     teams_purse = bot.auction_manager.teams
 
-    slots = TEAM_SLOTS.get(team_upper, {"overseas": 0, "total": 0})
-    overseas_slots = slots["overseas"]
-    total_slots = slots["total"]
-
     squad = detailed_squads.get(team_upper, [])
     purse = teams_purse.get(team_upper, 0)
 
-    msg = bot.formatter.format_squad_display(
-        team_upper, squad, purse, overseas_slots, total_slots
-    )
+    msg = bot.formatter.format_squad_display(team_upper, squad, purse)
     await interaction.response.send_message(msg)
 
 
@@ -431,7 +423,7 @@ async def team_squad(interaction: discord.Interaction):
 @app_commands.describe(team="Team Code (e.g. MI, CSK)")
 async def view_squad(interaction: discord.Interaction, team: str):
     """View any team's squad - available to all users"""
-    from config import TEAMS, TEAM_SLOTS
+    from config import TEAMS
 
     team_upper = team.upper()
 
@@ -442,16 +434,10 @@ async def view_squad(interaction: discord.Interaction, team: str):
     detailed_squads = bot.auction_manager.db.get_all_squads_detailed()
     teams_purse = bot.auction_manager.teams
 
-    slots = TEAM_SLOTS.get(team_upper, {"overseas": 0, "total": 0})
-    overseas_slots = slots["overseas"]
-    total_slots = slots["total"]
-
     squad = detailed_squads.get(team_upper, [])
     purse = teams_purse.get(team_upper, 0)
 
-    msg = bot.formatter.format_squad_display(
-        team_upper, squad, purse, overseas_slots, total_slots
-    )
+    msg = bot.formatter.format_squad_display(team_upper, squad, purse)
     await interaction.response.send_message(msg)
 
 
@@ -494,7 +480,7 @@ async def release_player(interaction: discord.Interaction, team: str, player: st
     success, message = bot.auction_manager.release_retained_player(team, player)
     if success:
         bot.create_background_task(bot.update_stats_display())
-    await interaction.response.send_message(message, ephemeral=not success)
+    await interaction.response.send_message(message, ephemeral=True)
 
 
 @bot.tree.command(
@@ -507,7 +493,7 @@ async def release_player(interaction: discord.Interaction, team: str, player: st
 @app_commands.checks.has_permissions(administrator=True)
 async def release_multiple(interaction: discord.Interaction, releases: str):
     """Release multiple players from teams at once"""
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
 
     entries = [e.strip() for e in releases.split(",") if e.strip()]
 
@@ -540,7 +526,7 @@ async def release_multiple(interaction: discord.Interaction, releases: str):
     if released:
         bot.create_background_task(bot.update_stats_display())
 
-    await interaction.followup.send(msg)
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 @bot.tree.command(
@@ -1388,6 +1374,70 @@ async def move_player(interaction: discord.Interaction, player: str, target_set:
         await interaction.response.send_message(
             f"❌ Could not find player **{player}** in any set.", ephemeral=True
         )
+
+
+@bot.tree.command(
+    name="moveplayers",
+    description="Move multiple players to a target set (Admin only)",
+)
+@app_commands.describe(
+    players="Comma-separated player names (e.g., Player1, Player2, Player3)",
+    target_set="Target set name (e.g., BA1, M1, accelerated)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def move_players(interaction: discord.Interaction, players: str, target_set: str):
+    """Move multiple players to a target set at once"""
+    await interaction.response.defer(ephemeral=True)
+
+    player_names = [p.strip() for p in players.split(",") if p.strip()]
+
+    if not player_names:
+        await interaction.followup.send("❌ No player names provided.", ephemeral=True)
+        return
+
+    moved = []
+    failed = []
+
+    for player_name in player_names:
+        success = bot.auction_manager.db.move_player_to_set(player_name, target_set)
+        if success:
+            moved.append(player_name)
+        else:
+            failed.append(player_name)
+
+    msg = f"**Moving players to {target_set.upper()}:**\n"
+    if moved:
+        msg += f"✅ **Moved ({len(moved)}):** {', '.join(moved)}\n"
+    if failed:
+        msg += f"❌ **Not found ({len(failed)}):** {', '.join(failed)}"
+
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bot.tree.command(
+    name="unsoldtime",
+    description="Set the timeout for unsold players (Admin only)",
+)
+@app_commands.describe(
+    seconds="Seconds before a player with no bids goes unsold (default: 60)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def set_unsold_time(interaction: discord.Interaction, seconds: int):
+    """Adjust the NO_START_TIMEOUT - time before a player goes unsold if no bids"""
+    import config
+
+    if seconds < 10 or seconds > 300:
+        await interaction.response.send_message(
+            "❌ Unsold timeout must be between 10 and 300 seconds.", ephemeral=True
+        )
+        return
+
+    config.NO_START_TIMEOUT = seconds
+    await interaction.response.send_message(
+        f"✅ Unsold timeout set to **{seconds} seconds**.\n"
+        f"Players with no bids will now go unsold after {seconds}s.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(
