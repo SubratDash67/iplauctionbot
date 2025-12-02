@@ -1065,7 +1065,14 @@ class Database:
 
             sale = dict(row)
 
-            # Restore purse
+            # Handle UNSOLD players differently - just delete the sale record
+            if sale["team_code"] == "UNSOLD":
+                # For unsold players, just remove the sale record
+                # The player can be re-auctioned via /reauction command
+                cursor.execute("DELETE FROM sales WHERE id = ?", (sale["id"],))
+                return sale
+
+            # For actual sales: Restore purse
             cursor.execute(
                 "UPDATE teams SET purse = purse + ? WHERE team_code = ?",
                 (sale["final_price"], sale["team_code"]),

@@ -461,11 +461,19 @@ async def rollback_sale(interaction: discord.Interaction):
     result = bot.auction_manager.rollback_last_sale()
 
     if result:
-        msg = f"**Rollback successful!**\n"
-        msg += f"Player: **{result['player_name']}**\n"
-        msg += f"Team: **{result['team_code']}**\n"
-        msg += f"Amount refunded: {format_amount(result['amount'])}\n"
-        msg += "Excel file updated."
+        if result["team_code"] == "UNSOLD":
+            # Player was unsold - just removed from sales record
+            msg = f"**Rollback successful!**\n"
+            msg += f"Player: **{result['player_name']}**\n"
+            msg += f"Status: Was marked UNSOLD - record removed.\n"
+            msg += "Use `/reauction {player_name}` to re-auction this player."
+        else:
+            # Player was sold - refund purse and remove from squad
+            msg = f"**Rollback successful!**\n"
+            msg += f"Player: **{result['player_name']}**\n"
+            msg += f"Team: **{result['team_code']}**\n"
+            msg += f"Amount refunded: {format_amount(result['final_price'])}\n"
+            msg += "Use `/reauction {player_name}` to re-auction this player."
 
         bot.create_background_task(bot.update_stats_display())
         await interaction.response.send_message(msg)
@@ -1557,20 +1565,19 @@ async def start_next_player(channel: discord.TextChannel):
     success, player_name, base_price, is_first_in_list = result
 
     if not success:
-        current_list = bot.auction_manager.get_current_list_name()
-        if current_list:
-            await channel.send(f"**✅ Set {current_list.upper()} completed!**")
-            await asyncio.sleep(LIST_GAP)
-            await start_next_player(channel)
-        else:
-            bot.auction_manager.paused = True
-            bot.auction_manager._save_state_to_db()
+        # All loaded sets are complete - pause auction and notify admin
+        bot.auction_manager.paused = True
+        bot.auction_manager._save_state_to_db()
 
-            unsold = bot.auction_manager.db.get_unsold_players()
-            await channel.send(
-                "**⚠️ All loaded sets have been completed.** Auction paused."
-            )
-            await channel.send(bot.auction_manager.get_purse_display())
+        await channel.send(
+            "**⚠️ All loaded sets have been completed!**\n\n"
+            "📋 **Admin Actions:**\n"
+            "• Use `/loadsets N` to load more sets from the Excel file\n"
+            "• Use `/resume` to continue after loading new sets\n"
+            "• Use `/reauction playername` to re-auction unsold players\n"
+            "• Use `/stop` to end the auction completely"
+        )
+        await channel.send(bot.auction_manager.get_purse_display())
         return
 
     current_set_name = bot.auction_manager.get_current_list_name()
