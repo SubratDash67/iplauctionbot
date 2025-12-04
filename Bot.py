@@ -6,6 +6,9 @@ Users are assigned to teams and can simply use /bid
 Single persistent paginated trade-log message (Prev/Next)
 """
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -14,9 +17,10 @@ import os
 import time
 import logging
 from typing import Optional, Dict, List
-from dotenv import load_dotenv
 
-load_dotenv()
+# Now it's safe to import admin_checks and other modules that read env/config
+from admin_checks import admin_or_owner_check
+
 
 # Configure logging
 logging.basicConfig(
@@ -97,7 +101,6 @@ class AuctionBot(commands.Bot):
     async def on_ready(self):
         logger.info(f"Logged in as {self.user.name} (ID: {self.user.id})")
         logger.info("Bot is ready! Use /help to see all commands.")
-
         self.user_teams = self.auction_manager.db.get_all_user_teams()
         logger.info(
             f"Loaded {len(self.user_teams)} user-team assignments from database."
@@ -161,7 +164,7 @@ for cmdname in ("settradechannel", "tradelog"):
 @app_commands.describe(
     user="The user to assign", team="Team abbreviation (MI, CSK, RCB, etc.)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def assign_team(interaction: discord.Interaction, user: discord.User, team: str):
     team_upper = team.upper()
     if team_upper not in TEAMS:
@@ -185,7 +188,7 @@ async def assign_team(interaction: discord.Interaction, user: discord.User, team
 @app_commands.describe(
     assignments="Format: @user1:TEAM1, @user2:TEAM2 (e.g., @John:MI, @Jane:CSK)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def assign_teams_bulk(interaction: discord.Interaction, assignments: str):
     """Assign multiple users to teams at once"""
     await interaction.response.defer()
@@ -242,7 +245,7 @@ async def assign_teams_bulk(interaction: discord.Interaction, assignments: str):
     name="unassignteam", description="Remove a user's team assignment (Admin only)"
 )
 @app_commands.describe(user="The user to unassign")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def unassign_team(interaction: discord.Interaction, user: discord.User):
     if user.id in bot.user_teams:
         team = bot.user_teams.pop(user.id)
@@ -367,7 +370,7 @@ async def bid(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="undobid", description="Undo the last bid (Admin only)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def undo_bid(interaction: discord.Interaction):
     success, msg = await bot.auction_manager.undo_last_bid()
     await interaction.response.send_message(msg)
@@ -465,7 +468,7 @@ async def view_squad(interaction: discord.Interaction, team: str):
 
 
 @bot.tree.command(name="rollback", description="Undo the last sale (Admin only)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def rollback_sale(interaction: discord.Interaction):
     result = bot.auction_manager.rollback_last_sale()
 
@@ -498,7 +501,7 @@ async def rollback_sale(interaction: discord.Interaction):
 @app_commands.describe(
     team="Team code (MI, CSK, etc.)", player="Player name to release"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def release_player(interaction: discord.Interaction, team: str, player: str):
     success, message = bot.auction_manager.release_retained_player(team, player)
     if success:
@@ -513,7 +516,7 @@ async def release_player(interaction: discord.Interaction, team: str, player: st
 @app_commands.describe(
     releases="Format: Team1:Player1, Team2:Player2 (e.g., MI:Rohit, CSK:Dhoni)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def release_multiple(interaction: discord.Interaction, releases: str):
     """Release multiple players from teams at once"""
     await interaction.response.defer(ephemeral=True)
@@ -560,7 +563,7 @@ async def release_multiple(interaction: discord.Interaction, releases: str):
     player="Player Name",
     price="Price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def add_to_squad(
     interaction: discord.Interaction, team: str, player: str, price: float
 ):
@@ -581,7 +584,7 @@ async def add_to_squad(
     player_name="Player name to add",
     base_price="Base price in Crores (e.g., 2 = 2Cr, 0.5 = 50L). Default: 0.2Cr (20L)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def add_player(
     interaction: discord.Interaction,
     list_name: str,
@@ -609,7 +612,7 @@ async def add_player(
     list_name="Name of the list (will be created if doesn't exist)",
     players="Players in format: Name1:Price1, Name2:Price2 (Price in Cr, e.g., Virat:2, Rohit:1.5)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def add_players_bulk(
     interaction: discord.Interaction, list_name: str, players: str
 ):
@@ -664,7 +667,7 @@ async def add_players_bulk(
     list_name="Name of the list to remove players from",
     players="Player names separated by commas (e.g., Player1, Player2, Player3)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def remove_players_bulk(
     interaction: discord.Interaction, list_name: str, players: str
 ):
@@ -703,7 +706,7 @@ async def remove_players_bulk(
     name="loadcsv", description="Load players from a CSV file (Admin only)"
 )
 @app_commands.describe(list_name="Name of the list", filepath="Full path to CSV file")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def load_csv(interaction: discord.Interaction, list_name: str, filepath: str):
     await interaction.response.defer()
     filepath = filepath.strip().strip('"').strip("'")
@@ -716,7 +719,7 @@ async def load_csv(interaction: discord.Interaction, list_name: str, filepath: s
     description="Load the NEXT N sets from IPL Excel (Admin only)",
 )
 @app_commands.describe(num_sets="Number of NEW sets to load (1-67)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def load_sets(interaction: discord.Interaction, num_sets: int):
     await interaction.response.defer()
 
@@ -734,7 +737,7 @@ async def load_sets(interaction: discord.Interaction, num_sets: int):
     name="loadretained",
     description="Load retained players into DB and Excel (Admin only)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def load_retained(interaction: discord.Interaction):
     """Loads retained data and initializes Excel."""
     await interaction.response.defer()
@@ -903,7 +906,7 @@ async def show_lists(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="start", description="Start the auction (Admin only)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def start_auction(interaction: discord.Interaction):
     success, message = bot.auction_manager.start_auction()
     if not success:
@@ -916,7 +919,7 @@ async def start_auction(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="stop", description="Stop the auction (Admin only)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def stop_auction(interaction: discord.Interaction):
     if bot.auction_manager.stop_auction():
         await bot.cancel_countdown_task()
@@ -928,7 +931,7 @@ async def stop_auction(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="pause", description="Pause the auction (Bulk Pause)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def pause_auction(interaction: discord.Interaction):
     if bot.auction_manager.pause_auction():
         await interaction.response.send_message("**Auction Paused**")
@@ -937,7 +940,7 @@ async def pause_auction(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="resume", description="Resume the auction (Admin only)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def resume_auction(interaction: discord.Interaction):
     if not bot.auction_manager.active:
         await interaction.response.send_message(
@@ -1017,7 +1020,7 @@ async def resume_auction(interaction: discord.Interaction):
 @bot.tree.command(
     name="skip", description="Skip current player - mark as unsold (Admin only)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def skip_player(interaction: discord.Interaction):
     if not bot.auction_manager.active or not bot.auction_manager.current_player:
         await interaction.response.send_message(
@@ -1044,7 +1047,7 @@ async def skip_player(interaction: discord.Interaction):
 @bot.tree.command(
     name="skipset", description="Skip current set and move to next set (Admin only)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def skip_set(interaction: discord.Interaction):
     if not bot.auction_manager.active:
         await interaction.response.send_message("No active auction.", ephemeral=True)
@@ -1073,7 +1076,7 @@ async def skip_set(interaction: discord.Interaction):
 @bot.tree.command(
     name="showskipped", description="Show all skipped players (Admin only)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def show_skipped(interaction: discord.Interaction):
     """Show all players that were skipped"""
     skipped = bot.auction_manager.get_skipped_players()
@@ -1110,7 +1113,7 @@ async def show_skipped(interaction: discord.Interaction):
     message="The announcement message to display",
     mention_everyone="Whether to @everyone (default: False)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def announce(
     interaction: discord.Interaction,
     message: str,
@@ -1138,7 +1141,7 @@ async def announce(
     name="setstatschannel",
     description="Set channel for live stats updates (Admin only)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def set_stats_channel(
     interaction: discord.Interaction, channel: discord.TextChannel
 ):
@@ -1154,7 +1157,7 @@ async def set_stats_channel(
     description="Set gap between last bid and start of countdown (Admin only)",
 )
 @app_commands.describe(seconds="Gap duration in seconds")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def set_countdown_gap(interaction: discord.Interaction, seconds: int):
     """Sets the delay between the last bid and when the countdown/timer logic starts."""
     if seconds < 0:
@@ -1172,7 +1175,7 @@ async def set_countdown_gap(interaction: discord.Interaction, seconds: int):
     name="setpurse", description="Set a team's purse manually (Admin only)"
 )
 @app_commands.describe(team="Team abbreviation", amount="Purse amount in rupees")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def set_purse(interaction: discord.Interaction, team: str, amount: int):
     team_validated = validate_team_name(team, bot.auction_manager.teams)
     if not team_validated:
@@ -1192,7 +1195,7 @@ async def set_purse(interaction: discord.Interaction, team: str, amount: int):
     name="resetpurses",
     description="Reset all team purses to configured values (Admin only)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def reset_purses(interaction: discord.Interaction):
     from config import TEAMS
 
@@ -1275,7 +1278,7 @@ class ClearConfirmView(discord.ui.View):
 @bot.tree.command(
     name="clear", description="Clear auction data/buys/released but keep retained data"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def clear_auction(interaction: discord.Interaction):
     """Clears trade, released, and auction data but keeps retained players."""
     # Show confirmation with backup option
@@ -1337,7 +1340,7 @@ async def clear_auction(interaction: discord.Interaction):
     name="setplayergap", description="Set gap between players in seconds (Admin only)"
 )
 @app_commands.describe(seconds="Gap in seconds between players (1-60)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def set_player_gap(interaction: discord.Interaction, seconds: int):
     if seconds < 1 or seconds > 60:
         await interaction.response.send_message(
@@ -1357,7 +1360,7 @@ async def set_player_gap(interaction: discord.Interaction, seconds: int):
 @app_commands.describe(
     player="Player name to move", target_set="Target set name (e.g., BA1, M1)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def move_player(interaction: discord.Interaction, player: str, target_set: str):
     success = bot.auction_manager.db.move_player_to_set(player, target_set)
     if success:
@@ -1378,7 +1381,7 @@ async def move_player(interaction: discord.Interaction, player: str, target_set:
     players="Comma-separated player names (e.g., Player1, Player2, Player3)",
     target_set="Target set name (e.g., BA1, M1, accelerated)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def move_players(interaction: discord.Interaction, players: str, target_set: str):
     """Move multiple players to a target set at once"""
     await interaction.response.defer(ephemeral=True)
@@ -1414,7 +1417,7 @@ async def move_players(interaction: discord.Interaction, players: str, target_se
 @app_commands.describe(
     seconds="Seconds before a player with no bids goes unsold (default: 60)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def set_unsold_time(interaction: discord.Interaction, seconds: int):
     """Adjust the NO_START_TIMEOUT - time before a player goes unsold if no bids"""
     import config
@@ -1437,7 +1440,7 @@ async def set_unsold_time(interaction: discord.Interaction, seconds: int):
     name="fixduplicates",
     description="Remove duplicate players from squads (Admin only)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def fix_duplicates(interaction: discord.Interaction):
     removed = bot.auction_manager.db.remove_duplicate_players()
     if removed > 0:
@@ -1524,7 +1527,7 @@ async def user_help_command(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="adminhelp", description="Show commands for Admins")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def admin_help_command(interaction: discord.Interaction):
     embed1 = discord.Embed(
         title="🔧 Admin Commands - Auction Control", color=discord.Color.blue()
@@ -1880,7 +1883,7 @@ async def countdown_loop(channel: discord.TextChannel):
     to_team="Team receiving the player",
     price="Trade price in Crores (e.g., 5 = 5Cr, 0.5 = 50L)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def trade_command(
     interaction: discord.Interaction,
     player: str,
@@ -1971,7 +1974,7 @@ async def trade_command(
     compensation="Compensation amount in Crores (optional, default: 0)",
     compensation_from="Team paying compensation: team_a or team_b (optional)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def swap_command(
     interaction: discord.Interaction,
     player_a: str,
@@ -2420,7 +2423,7 @@ class TradeLogView(discord.ui.View):
     name="settradechannel", description="Set channel for trade log display (Admin only)"
 )
 @app_commands.describe(channel="Channel for trade log display")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def settradechannel(
     interaction: discord.Interaction,
     channel: discord.TextChannel,
@@ -2553,7 +2556,7 @@ async def tradelog(interaction: discord.Interaction):
     name="soldto", description="Manually mark current player as sold (Admin only)"
 )
 @app_commands.describe(team="Team code (MI, CSK, etc.)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def sold_to(interaction: discord.Interaction, team: str):
     if not bot.auction_manager.active:
         await interaction.response.send_message("No active auction", ephemeral=True)
@@ -2619,7 +2622,7 @@ async def sold_to(interaction: discord.Interaction, team: str):
 @bot.tree.command(
     name="unsold", description="Mark current player as unsold (Admin only)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def mark_unsold(interaction: discord.Interaction):
     if not bot.auction_manager.active or not bot.auction_manager.current_player:
         await interaction.response.send_message(
@@ -2653,14 +2656,14 @@ async def mark_unsold(interaction: discord.Interaction):
 @app_commands.describe(
     player_name="Name of the player to re-auction (uses original base price from CSV)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def reauction_player(interaction: discord.Interaction, player_name: str):
     success, message = bot.auction_manager.reauction_player(player_name)
     await interaction.response.send_message(message, ephemeral=not success)
 
 
 @bot.tree.command(name="showunsold", description="Show all unsold players (Admin only)")
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def show_unsold(interaction: discord.Interaction):
     """Show all players that went unsold (in Accelerated list)"""
     unsold = bot.auction_manager.db.get_unsold_players()
@@ -2700,7 +2703,7 @@ async def show_unsold(interaction: discord.Interaction):
     name="reauctionall",
     description="Bring ALL unsold players back to auction (Admin only)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def reauction_all(interaction: discord.Interaction):
     """Re-auction all unsold players"""
     unsold = bot.auction_manager.db.get_unsold_players()
@@ -2727,7 +2730,7 @@ async def reauction_all(interaction: discord.Interaction):
 @app_commands.describe(
     set_name="Set name to re-auction unsold players from (e.g., M1, BA1)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def reauction_from_list(interaction: discord.Interaction, set_name: str):
     """Re-auction unsold players from a specific set"""
     unsold = bot.auction_manager.db.get_unsold_players()
@@ -2760,7 +2763,7 @@ async def reauction_from_list(interaction: discord.Interaction, set_name: str):
 @app_commands.describe(
     player_names="Comma-separated player names (e.g., Player1, Player2, Player3)"
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def reauction_multiple(interaction: discord.Interaction, player_names: str):
     """Re-auction multiple specific players"""
     await interaction.response.defer()
@@ -2825,7 +2828,7 @@ async def find_player_cmd(interaction: discord.Interaction, name: str):
     players="Comma-separated player names OR the keyword 'released'",
     price="New base price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)",
 )
-@app_commands.checks.has_permissions(administrator=True)
+@admin_or_owner_check()
 async def change_base_price_cmd(
     interaction: discord.Interaction, players: str, price: float
 ):

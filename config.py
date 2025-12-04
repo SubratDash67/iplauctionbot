@@ -6,7 +6,27 @@ import os
 
 # Bot token is loaded from environment variable DISCORD_TOKEN (put it in .env)
 BOT_TOKEN = os.getenv("DISCORD_TOKEN", "")
+# BOT ADMINS (superusers of the bot). Can be set as a comma-separated env var
+# Example .env:
+#   BOT_ADMINS="123456789012345678,987654321098765432"
 
+_raw_bot_admins = os.getenv("BOT_ADMINS", "").strip()
+if _raw_bot_admins:
+    BOT_ADMINS = []
+    for part in _raw_bot_admins.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            BOT_ADMINS.append(int(part))
+        except ValueError:
+            # skip invalid entries (non-numeric)
+            pass
+else:
+    # Fallback: hardcode trusted user IDs here (integers) if you prefer:
+    # BOT_ADMINS = [123456789012345678]
+    BOT_ADMINS = []
+    
 # Auction Settings - Timing Configuration
 # =========================================
 DEFAULT_COUNTDOWN = 120  # Initial timer when bidding starts (2 minutes)
