@@ -147,7 +147,7 @@ RETAINED_PLAYERS = {
         ("Shashank Singh", 55000000, False),  # 550 L = 5.5 Cr
         ("Shreyas Iyer", 267500000, False),  # 2675 L = 26.75 Cr
         ("Suryansh Shedge", 3000000, False),  # 30 L
-        ("Vishnu Vinod", 9500000),  # 95 L
+        ("Vishnu Vinod", 9500000, False),  # 95 L
         ("Vyshak Vijaykumar", 18000000, False),  # 180 L = 1.8 Cr
         ("Xavier Bartlett", 8000000, True),  # 80 L *
         ("Yash Thakur", 16000000, False),  # 160 L = 1.6 Cr
@@ -233,4 +233,3 @@ def get_remaining_purse(team_code: str, initial_purse: int) -> int:
     This function now simply returns the initial_purse passed to it.
     """
     return initial_purse
-

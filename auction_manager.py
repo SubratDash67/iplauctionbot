@@ -902,7 +902,13 @@ class AuctionManager:
     def trade_player(
         self, player_name: str, from_team: str, to_team: str, price_cr: float
     ) -> Tuple[bool, str]:
-        """Trade player between teams (cash trade)"""
+        """Trade player between teams (cash trade)
+
+        Cash Deal Logic:
+        - from_team gets +price (sells player)
+        - to_team pays -price (buys player)
+        - Player's new salary in to_team becomes the trade price
+        """
         # Convert Crores to Rupees (1 Cr = 10,000,000)
         price = int(price_cr * 10_000_000)
 
@@ -910,11 +916,20 @@ class AuctionManager:
         to_team_upper = to_team.upper()
         from_team_upper = from_team.upper()
         teams = self.db.get_teams()
+
+        # Store old purses for display
+        old_purse_from = teams.get(from_team_upper, 0)
+        old_purse_to = teams.get(to_team_upper, 0)
+
         if to_team_upper in teams and teams[to_team_upper] < price:
             return (
                 False,
                 f"**{to_team_upper}** has insufficient purse. Need {format_amount(price)}, have {format_amount(teams[to_team_upper])}",
             )
+
+        # Check overseas status for the message
+        is_overseas = self.db.get_player_overseas_status(player_name)
+        overseas_tag = " ✈️" if is_overseas else ""
 
         success, msg = self.db.trade_player(
             player_name, from_team_upper, to_team_upper, price
@@ -922,10 +937,21 @@ class AuctionManager:
         if success:
             # Update Excel after trade
             self._update_excel_after_trade()
-            return (
-                True,
-                f"Traded **{player_name}** from **{from_team_upper}** to **{to_team_upper}** for {format_amount(price)}",
-            )
+
+            # Get new purses after trade
+            teams = self.db.get_teams()
+            new_purse_from = teams.get(from_team_upper, 0)
+            new_purse_to = teams.get(to_team_upper, 0)
+
+            # Build detailed response message
+            response = f"✅ **Cash Trade Completed!**\n\n"
+            response += f"**{player_name}**{overseas_tag}\n"
+            response += f"**{from_team_upper}** → **{to_team_upper}** for **{format_amount(price)}**\n\n"
+            response += f"**Purse Changes:**\n"
+            response += f"• **{from_team_upper}**: {format_amount(old_purse_from)} → {format_amount(new_purse_from)} (+{format_amount(price)})\n"
+            response += f"• **{to_team_upper}**: {format_amount(old_purse_to)} → {format_amount(new_purse_to)} (-{format_amount(price)})"
+
+            return (True, response)
         return False, (
             msg if msg else "Trade failed. Check if player exists in source team."
         )
@@ -941,8 +967,15 @@ class AuctionManager:
     ) -> Tuple[bool, str]:
         """
         Swap two players between teams.
-        Per IPL rules: players exchange teams, salaries count against NEW team's cap.
-        Compensation (if any) is NOT part of salary cap.
+
+        Swap Trade Logic:
+        - Players exchange teams, keeping their original salaries
+        - Price difference is transferred from team getting higher-valued player
+        - Compensation (if any) is additional cash transfer between teams
+
+        Example: Bumrah (18cr MI) ↔ Khaleel (4.8cr CSK)
+        Difference = 18 - 4.8 = 13.2cr
+        MI gets +13.2cr, CSK pays -13.2cr
         """
         team_a_upper = team_a.upper()
         team_b_upper = team_b.upper()
@@ -953,6 +986,24 @@ class AuctionManager:
             return False, f"Invalid team: {team_a}"
         if team_b_upper not in teams:
             return False, f"Invalid team: {team_b}"
+
+        # Store old purses for display
+        old_purse_a = teams.get(team_a_upper, 0)
+        old_purse_b = teams.get(team_b_upper, 0)
+
+        # Get original player prices before swap
+        original_price_a = (
+            self.db.get_player_price_in_squad(team_a_upper, player_a) or 0
+        )
+        original_price_b = (
+            self.db.get_player_price_in_squad(team_b_upper, player_b) or 0
+        )
+
+        # Check overseas status for display
+        is_overseas_a = self.db.get_player_overseas_status(player_a)
+        is_overseas_b = self.db.get_player_overseas_status(player_b)
+        overseas_tag_a = " ✈️" if is_overseas_a else ""
+        overseas_tag_b = " ✈️" if is_overseas_b else ""
 
         # Convert compensation to rupees
         compensation_amount = (
@@ -972,24 +1023,52 @@ class AuctionManager:
             # Update Excel after swap
             self._update_excel_after_trade()
 
-            # Get actual prices for message
-            price_a = self.db.get_player_price_in_squad(
-                team_b_upper, player_a
-            )  # A is now in B
-            price_b = self.db.get_player_price_in_squad(
-                team_a_upper, player_b
-            )  # B is now in A
+            # Get new purses after swap
+            teams = self.db.get_teams()
+            new_purse_a = teams.get(team_a_upper, 0)
+            new_purse_b = teams.get(team_b_upper, 0)
 
-            msg = f"**Swap Completed!**\n"
-            msg += f"• **{player_a}** ({format_amount(price_a or 0)}) → **{team_b_upper}**\n"
-            msg += (
-                f"• **{player_b}** ({format_amount(price_b or 0)}) → **{team_a_upper}**"
-            )
+            # Calculate price difference for display
+            price_diff = abs(original_price_a - original_price_b)
+
+            # Build detailed response message
+            response = f"✅ **Swap Trade Completed!**\n\n"
+            response += f"**{player_a}**{overseas_tag_a} ({format_amount(original_price_a)}) → **{team_b_upper}**\n"
+            response += f"**{player_b}**{overseas_tag_b} ({format_amount(original_price_b)}) → **{team_a_upper}**\n\n"
+
+            # Show price difference calculation
+            if price_diff > 0:
+                if original_price_a > original_price_b:
+                    response += f"**Price Difference:** {format_amount(original_price_a)} - {format_amount(original_price_b)} = {format_amount(price_diff)}\n"
+                    response += f"({team_b_upper} pays {team_a_upper})\n\n"
+                else:
+                    response += f"**Price Difference:** {format_amount(original_price_b)} - {format_amount(original_price_a)} = {format_amount(price_diff)}\n"
+                    response += f"({team_a_upper} pays {team_b_upper})\n\n"
 
             if compensation_amount > 0 and compensation_from:
-                msg += f"\n• Compensation: **{compensation_from.upper()}** pays {format_amount(compensation_amount)}"
+                comp_from = compensation_from.upper()
+                comp_to = team_b_upper if comp_from == team_a_upper else team_a_upper
+                response += f"**Compensation:** {format_amount(compensation_amount)} ({comp_from} → {comp_to})\n\n"
 
-            return True, msg
+            # Show purse changes
+            change_a = new_purse_a - old_purse_a
+            change_b = new_purse_b - old_purse_b
+            change_str_a = (
+                f"+{format_amount(change_a)}"
+                if change_a >= 0
+                else f"-{format_amount(abs(change_a))}"
+            )
+            change_str_b = (
+                f"+{format_amount(change_b)}"
+                if change_b >= 0
+                else f"-{format_amount(abs(change_b))}"
+            )
+
+            response += f"**Purse Changes:**\n"
+            response += f"• **{team_a_upper}**: {format_amount(old_purse_a)} → {format_amount(new_purse_a)} ({change_str_a})\n"
+            response += f"• **{team_b_upper}**: {format_amount(old_purse_b)} → {format_amount(new_purse_b)} ({change_str_b})"
+
+            return True, response
 
         return False, msg
 
@@ -1603,7 +1682,7 @@ class AuctionManager:
     # ==================== DISPLAY HELPERS ====================
 
     def get_purse_display(self) -> str:
-        return self.formatter.format_purse_display(self.db.get_teams())
+        return self.formatter.format_purse_display(self.db.get_teams(), self.db)
 
     def get_bid_history_display(self, player: str = None, limit: int = 5) -> str:
         if player:

@@ -508,8 +508,8 @@ class Database:
                 for row in cursor.fetchall()
             ]
 
-    def get_all_squads(self) -> Dict[str, List[Tuple[str, int]]]:
-        """Get all team squads (simple format)"""
+    def get_all_squads(self) -> Dict[str, List[Tuple[str, int, bool]]]:
+        """Get all team squads (with overseas info)"""
         with self._transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT team_code FROM teams")
@@ -518,11 +518,12 @@ class Database:
             squads = {}
             for team in teams:
                 cursor.execute(
-                    "SELECT player_name, price FROM team_squads WHERE team_code = ? ORDER BY bought_at",
+                    "SELECT player_name, price, is_overseas FROM team_squads WHERE team_code = ? ORDER BY bought_at",
                     (team,),
                 )
                 squads[team] = [
-                    (row["player_name"], row["price"]) for row in cursor.fetchall()
+                    (row["player_name"], row["price"], bool(row["is_overseas"]))
+                    for row in cursor.fetchall()
                 ]
             return squads
 
@@ -2053,4 +2054,3 @@ class Database:
                 (1 if is_overseas else 0, player_name),
             )
             return cursor.rowcount > 0
-

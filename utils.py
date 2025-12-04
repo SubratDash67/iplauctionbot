@@ -393,7 +393,7 @@ class FileManager:
     def update_team_summary(
         filepath: str,
         teams: Dict[str, int],
-        team_squads: Dict[str, List[Tuple[str, int]]],
+        team_squads: Dict[str, List[Tuple[str, int, bool]]],
     ) -> None:
         """Update the team summary sheet with current data"""
         try:
@@ -403,7 +403,7 @@ class FileManager:
             if "Team Summary" in wb.sheetnames:
                 del wb["Team Summary"]
             ts = wb.create_sheet("Team Summary", 1)  # Position after Auction Results
-            ts.append(["Team", "Players Bought", "Total Spent", "Remaining Purse"])
+            ts.append(["Team", "Players", "Overseas", "Total Spent", "Remaining Purse"])
             header_fill = PatternFill(
                 start_color="366092", end_color="366092", fill_type="solid"
             )
@@ -417,12 +417,22 @@ class FileManager:
             for team in sorted(teams.keys()):
                 purse_left = teams.get(team, 0)
                 squad = team_squads.get(team, [])
-                spent = sum(price for _, price in squad)
+                # Handle both old and new formats
+                spent = 0
+                overseas_count = 0
+                for item in squad:
+                    if len(item) >= 3:
+                        spent += item[1]
+                        if item[2]:
+                            overseas_count += 1
+                    else:
+                        spent += item[1]
                 # Format amounts as cr/L for readability
                 ts.append(
                     [
                         team,
                         len(squad),
+                        overseas_count,
                         format_amount(spent),
                         format_amount(purse_left),
                     ]
@@ -630,7 +640,7 @@ class FileManager:
     def update_individual_team_sheets(
         filepath: str,
         teams: Dict[str, int],
-        team_squads: Dict[str, List[Tuple[str, int]]],
+        team_squads: Dict[str, List[Tuple[str, int, bool]]],
         retained_players: Dict[str, List[Tuple[str, int]]] = None,
         traded_to_team: Dict[str, Set[str]] = None,
     ) -> None:
@@ -639,7 +649,7 @@ class FileManager:
         Args:
             filepath: Path to Excel file
             teams: Team purses
-            team_squads: All squad data from database
+            team_squads: All squad data from database (player, price, is_overseas)
             retained_players: Retained players dict (optional, will import if not provided)
             traded_to_team: Dict mapping team code to set of player names traded TO that team
         """
@@ -694,30 +704,46 @@ class FileManager:
                 retained_names = {p[0].lower() for p in retained_data}
                 traded_names = {p.lower() for p in traded_to_team.get(team_code, set())}
 
+                # Normalize squad to handle both old and new formats
+                # New format: (player, price, is_overseas)
+                # Old format: (player, price)
+                normalized_squad = []
+                for item in squad:
+                    if len(item) >= 3:
+                        normalized_squad.append((item[0], item[1], item[2]))
+                    else:
+                        normalized_squad.append((item[0], item[1], False))
+
                 # Partition squad
                 squad_retained = [
-                    (p, pr) for p, pr in squad if p.lower() in retained_names
+                    (p, pr, is_os)
+                    for p, pr, is_os in normalized_squad
+                    if p.lower() in retained_names
                 ]
                 bought_players = [
-                    (p, pr)
-                    for p, pr in squad
+                    (p, pr, is_os)
+                    for p, pr, is_os in normalized_squad
                     if p.lower() not in retained_names and p.lower() not in traded_names
                 ]
                 traded_players = [
-                    (p, pr) for p, pr in squad if p.lower() in traded_names
+                    (p, pr, is_os)
+                    for p, pr, is_os in normalized_squad
+                    if p.lower() in traded_names
                 ]
 
-                total_spent = sum(pr for _, pr in squad)
+                total_spent = sum(pr for _, pr, _ in normalized_squad)
+                overseas_count = sum(1 for _, _, is_os in normalized_squad if is_os)
 
                 # Write sections
                 row = 2
                 if squad_retained:
                     ts.append(["--- Retained ---", "", ""])
                     row += 1
-                    for player, price in squad_retained:
+                    for player, price, is_overseas in squad_retained:
+                        display_name = f"✈️ {player}" if is_overseas else player
                         ts.append(
                             [
-                                sanitize_csv_value(player),
+                                sanitize_csv_value(display_name),
                                 format_amount(price),
                                 "Retained",
                             ]
@@ -727,18 +753,28 @@ class FileManager:
                 if bought_players:
                     ts.append(["--- Bought ---", "", ""])
                     row += 1
-                    for player, price in bought_players:
+                    for player, price, is_overseas in bought_players:
+                        display_name = f"✈️ {player}" if is_overseas else player
                         ts.append(
-                            [sanitize_csv_value(player), format_amount(price), "Bought"]
+                            [
+                                sanitize_csv_value(display_name),
+                                format_amount(price),
+                                "Bought",
+                            ]
                         )
                         row += 1
 
                 if traded_players:
                     ts.append(["--- Traded ---", "", ""])
                     row += 1
-                    for player, price in traded_players:
+                    for player, price, is_overseas in traded_players:
+                        display_name = f"✈️ {player}" if is_overseas else player
                         ts.append(
-                            [sanitize_csv_value(player), format_amount(price), "Traded"]
+                            [
+                                sanitize_csv_value(display_name),
+                                format_amount(price),
+                                "Traded",
+                            ]
                         )
                         row += 1
 
@@ -747,7 +783,8 @@ class FileManager:
                 purse_left = teams.get(team_code, 0)
 
                 summary_row = ts.max_row + 1
-                ts.append(["Total Players", len(squad), ""])
+                ts.append(["Total Players", len(normalized_squad), ""])
+                ts.append(["Overseas Players", overseas_count, ""])
                 ts.append(["Total Spent", format_amount(total_spent), ""])
                 ts.append(["Purse Remaining", format_amount(purse_left), ""])
 
@@ -771,7 +808,7 @@ class FileManager:
         filepath: str,
         sales: List[dict],
         teams: Dict[str, int],
-        team_squads: Dict[str, List[Tuple[str, int]]],
+        team_squads: Dict[str, List[Tuple[str, int, bool]]],
         unsold_players: List[Tuple[str, str, Optional[int]]] = None,
         released_players: List[Tuple[str, str, Optional[int]]] = None,
         trades: List[dict] = None,
@@ -784,7 +821,7 @@ class FileManager:
             filepath: Path to Excel file
             sales: List of sale records
             teams: Team purses
-            team_squads: All squad data
+            team_squads: All squad data (player, price, is_overseas)
             unsold_players: List of (player_name, set_name, base_price) for unsold players
             released_players: List of (player_name, released_from, price) for released players
             trades: List of trade records from trade_history table
@@ -873,10 +910,24 @@ class FileManager:
 class MessageFormatter:
 
     @staticmethod
-    def format_purse_display(teams: Dict[str, int]) -> str:
-        msg = "**Current Team Purses:**\n```\n"
+    def format_purse_display(teams: Dict[str, int], db=None) -> str:
+        """Format team purses with squad info if database is provided"""
+        msg = "**Team Summary:**\n```\n"
+        msg += f"{'Team':<6} {'Purse':>10} {'Players':>8} {'Overseas':>9}\n"
+        msg += "=" * 35 + "\n"
+
         for t, p in sorted(teams.items()):
-            msg += f"{t:6} : {format_amount(p)}\n"
+            # Get player counts if db is available
+            if db:
+                try:
+                    squad = db.get_team_squad(t)
+                    player_count = len(squad)
+                    overseas_count = sum(1 for _, _, _, _, is_os in squad if is_os)
+                    msg += f"{t:<6} {format_amount(p):>10} {player_count:>8} {overseas_count:>9}\n"
+                except Exception:
+                    msg += f"{t:<6} {format_amount(p):>10} {'?':>8} {'?':>9}\n"
+            else:
+                msg += f"{t:<6} {format_amount(p):>10}\n"
         msg += "```"
         return msg
 
@@ -952,7 +1003,7 @@ class MessageFormatter:
     @staticmethod
     def format_squad_display(
         team_code: str,
-        squad: List[Tuple[str, int, str, str, bool]], 
+        squad: List[Tuple[str, int, str, str, bool]],
         purse: int,
         available_slots: int = 0,
         overseas_slots: int = 0,
@@ -962,10 +1013,10 @@ class MessageFormatter:
         from config import MAX_OVERSEAS_LIMIT
 
         current_players = len(squad)
-        
+
         # FIX 1: Update sum to unpack 5 values (_, price, _, _, _)
         total_spent = sum(price for _, price, _, _, _ in squad) if squad else 0
-        
+
         # Calculate overseas count (using index 4)
         overseas_count = sum(1 for row in squad if row[4])
 
@@ -978,9 +1029,15 @@ class MessageFormatter:
             return base
 
         # FIX 2: Update these comprehensions to unpack 5 items: p, pr, acq, src, iso
-        retained_players = [(p, pr, src, iso) for p, pr, acq, src, iso in squad if acq == "retained"]
-        traded_players = [(p, pr, src, iso) for p, pr, acq, src, iso in squad if acq == "traded"]
-        bought_players = [(p, pr, src, iso) for p, pr, acq, src, iso in squad if acq == "bought"]
+        retained_players = [
+            (p, pr, src, iso) for p, pr, acq, src, iso in squad if acq == "retained"
+        ]
+        traded_players = [
+            (p, pr, src, iso) for p, pr, acq, src, iso in squad if acq == "traded"
+        ]
+        bought_players = [
+            (p, pr, src, iso) for p, pr, acq, src, iso in squad if acq == "bought"
+        ]
 
         msg = f"**{team_code} Squad:**\n```\n"
 
@@ -1009,7 +1066,7 @@ class MessageFormatter:
         # Count bought players (not retained/traded) for slots calculation
         bought_count = len(bought_players)
         slots_remaining = available_slots - bought_count
-        
+
         # Calculate remaining overseas slots
         remaining_overseas = MAX_OVERSEAS_LIMIT - overseas_count
 
@@ -1034,4 +1091,3 @@ def calculate_next_bid(current_bid: int) -> int:
     from config import get_bid_increment
 
     return current_bid + get_bid_increment(current_bid)
-
