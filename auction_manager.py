@@ -110,8 +110,8 @@ class AuctionManager:
         # Build a global set of all existing players (case-insensitive)
         all_existing_players = set()
         for team_code, squad in existing_squads.items():
-            for name, _ in squad:
-                all_existing_players.add(name.lower())
+            for item in squad:
+                all_existing_players.add(item[0].lower())
 
         count = 0
         for team_code, players in RETAINED_PLAYERS.items():
@@ -671,8 +671,8 @@ class AuctionManager:
             squads = self.db.get_all_squads()
             is_sold = False
             for squad in squads.values():
-                for pname, _ in squad:
-                    if pname.lower() == self.current_player.lower():
+                for item in squad:
+                    if item[0].lower() == self.current_player.lower():
                         is_sold = True
                         break
                 if is_sold:
@@ -799,8 +799,8 @@ class AuctionManager:
         # CRITICAL: Check if player is already sold (prevents double-sell bug)
         squads = self.db.get_all_squads()
         for squad in squads.values():
-            for pname, _ in squad:
-                if pname.lower() == self.current_player.lower():
+            for item in squad:
+                if item[0].lower() == self.current_player.lower():
                     return BidResult(False, "This player has already been sold")
 
         team_upper = team.upper()
@@ -1300,8 +1300,8 @@ class AuctionManager:
 
         squads = self.db.get_all_squads()
         for team, squad in squads.items():
-            for name, _ in squad:
-                if name.lower() == actual_name.lower():
+            for item in squad:
+                if item[0].lower() == actual_name.lower():
                     return (
                         False,
                         f"**{actual_name}** was already sold to **{team}**. Use /rollback to undo the sale first.",
@@ -1352,7 +1352,9 @@ class AuctionManager:
             return False, f"{team_upper} has no players to release."
 
         player_found = None
-        for p_name, price in squads[team_upper]:
+        for item in squads[team_upper]:
+            p_name = item[0]
+            price = item[1]
             if p_name.lower() == player_name.lower():
                 player_found = (p_name, price)
                 break
@@ -1568,7 +1570,10 @@ class AuctionManager:
             "timestamp": datetime.now().isoformat(),
             "teams": self.db.get_teams(),
             "squads": {
-                team: [(p, price) for p, price in players]
+                team: [
+                    (item[0], item[1], item[2] if len(item) > 2 else False)
+                    for item in players
+                ]
                 for team, players in self.db.get_all_squads().items()
             },
             "sales": self.db.get_all_sales(),
@@ -1870,7 +1875,9 @@ class AuctionManager:
         squads = self.db.get_all_squads()
         squad_matches = []
         for team, players in squads.items():
-            for pname, price in players:
+            for item in players:
+                pname = item[0]
+                price = item[1]
                 if q in pname.lower():
                     squad_matches.append((pname, team, price))
 

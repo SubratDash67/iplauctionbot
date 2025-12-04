@@ -958,7 +958,8 @@ async def resume_auction(interaction: discord.Interaction):
         squads = bot.auction_manager.db.get_all_squads()
         player_already_sold = False
         for squad in squads.values():
-            for pname, _ in squad:
+            for item in squad:
+                pname = item[0]
                 if pname.lower() == current_player.lower():
                     player_already_sold = True
                     break
@@ -1472,16 +1473,25 @@ async def all_squads(interaction: discord.Interaction):
     teams_purse = bot.auction_manager.teams
 
     msg = "**📋 All Teams Summary:**\n```\n"
-    msg += f"{'Team':<6} {'Players':>8} {'Spent':>12} {'Purse':>12}\n"
-    msg += "=" * 42 + "\n"
+    msg += f"{'Team':<6} {'Players':>8} {'Overseas':>9} {'Spent':>12} {'Purse':>12}\n"
+    msg += "=" * 51 + "\n"
 
     for team_code in sorted(teams_purse.keys()):
         squad = squads.get(team_code, [])
         player_count = len(squad)
-        total_spent = sum(price for _, price in squad)
+        # Handle both old (player, price) and new (player, price, is_overseas) formats
+        total_spent = 0
+        overseas_count = 0
+        for item in squad:
+            if len(item) >= 3:
+                total_spent += item[1]
+                if item[2]:
+                    overseas_count += 1
+            else:
+                total_spent += item[1]
         purse = teams_purse.get(team_code, 0)
 
-        msg += f"{team_code:<6} {player_count:>8} {format_amount(total_spent):>12} {format_amount(purse):>12}\n"
+        msg += f"{team_code:<6} {player_count:>8} {overseas_count:>9} {format_amount(total_spent):>12} {format_amount(purse):>12}\n"
 
     msg += "```\n*Use `/squad <team>` to view detailed squad*"
     await interaction.response.send_message(msg)
@@ -1808,7 +1818,8 @@ async def countdown_loop(channel: discord.TextChannel):
                 squads = bot.auction_manager.db.get_all_squads()
                 player_already_sold = False
                 for squad in squads.values():
-                    for pname, _ in squad:
+                    for item in squad:
+                        pname = item[0]
                         if pname.lower() == player_name.lower():
                             player_already_sold = True
                             break
@@ -1914,20 +1925,34 @@ async def trade_command(
             )
             return
 
+    # Get current purses for display
+    teams_purse = bot.auction_manager.teams
+    from_purse = teams_purse.get(from_team_upper, 0)
+    to_purse = teams_purse.get(to_team_upper, 0)
+    trade_amount = int(price * 10_000_000)
+
     # Create confirmation view
     view = TradeConfirmView(
-        bot, player, from_team_upper, to_team_upper, price, interaction.user.id
+        bot,
+        player,
+        from_team_upper,
+        to_team_upper,
+        price,
+        interaction.user.id,
+        interaction.channel,
     )
 
-    price_display = format_amount(int(price * 10_000_000))
+    price_display = format_amount(trade_amount)
     overseas_tag = " ✈️(Overseas)" if is_overseas else ""
 
     confirm_msg = (
         f"**Confirm Trade:**\n"
         f"• Player: **{player}**{overseas_tag}\n"
-        f"• From: **{from_team_upper}**\n"
-        f"• To: **{to_team_upper}**\n"
+        f"• From: **{from_team_upper}** → To: **{to_team_upper}**\n"
         f"• Price: **{price_display}**\n\n"
+        f"**Current Purses:**\n"
+        f"• {from_team_upper}: {format_amount(from_purse)} → {format_amount(from_purse + trade_amount)} (+{price_display})\n"
+        f"• {to_team_upper}: {format_amount(to_purse)} → {format_amount(to_purse - trade_amount)} (-{price_display})\n\n"
         f"Click Confirm to execute the trade."
     )
 
@@ -2027,6 +2052,41 @@ async def swap_command(
             )
             return
 
+    # Get current purses and player prices for display
+    teams_purse = bot.auction_manager.teams
+    purse_a = teams_purse.get(team_a_upper, 0)
+    purse_b = teams_purse.get(team_b_upper, 0)
+
+    price_a = (
+        bot.auction_manager.db.get_player_price_in_squad(team_a_upper, player_a) or 0
+    )
+    price_b = (
+        bot.auction_manager.db.get_player_price_in_squad(team_b_upper, player_b) or 0
+    )
+
+    # Calculate expected purse changes
+    price_diff = abs(price_a - price_b)
+    comp_amount = int(compensation * 10_000_000) if compensation > 0 else 0
+
+    # Determine who pays/receives
+    if price_a > price_b:
+        # Team A had more expensive player, gets the difference
+        change_a = price_diff
+        change_b = -price_diff
+    else:
+        # Team B had more expensive player, gets the difference
+        change_a = -price_diff
+        change_b = price_diff
+
+    # Apply compensation
+    if comp_amount > 0 and comp_from:
+        if comp_from == team_a_upper:
+            change_a -= comp_amount
+            change_b += comp_amount
+        else:
+            change_a += comp_amount
+            change_b -= comp_amount
+
     # Create confirmation view
     view = SwapConfirmView(
         bot,
@@ -2037,6 +2097,7 @@ async def swap_command(
         compensation,
         comp_from,
         interaction.user.id,
+        interaction.channel,
     )
 
     overseas_tag_a = " ✈️" if is_overseas_a else ""
@@ -2044,11 +2105,31 @@ async def swap_command(
 
     confirm_msg = (
         f"**Confirm Swap:**\n"
-        f"• **{player_a}**{overseas_tag_a} ({team_a_upper}) ↔ **{player_b}**{overseas_tag_b} ({team_b_upper})\n"
+        f"• **{player_a}**{overseas_tag_a} ({format_amount(price_a)}) → {team_b_upper}\n"
+        f"• **{player_b}**{overseas_tag_b} ({format_amount(price_b)}) → {team_a_upper}\n"
     )
     if compensation > 0 and comp_from:
-        confirm_msg += f"• Compensation: **{comp_from}** pays **{format_amount(int(compensation * 10_000_000))}**\n"
-    confirm_msg += "\nClick Confirm to execute the swap."
+        confirm_msg += (
+            f"• Compensation: **{comp_from}** pays **{format_amount(comp_amount)}**\n"
+        )
+
+    change_a_str = (
+        f"+{format_amount(change_a)}"
+        if change_a >= 0
+        else f"-{format_amount(abs(change_a))}"
+    )
+    change_b_str = (
+        f"+{format_amount(change_b)}"
+        if change_b >= 0
+        else f"-{format_amount(abs(change_b))}"
+    )
+
+    confirm_msg += (
+        f"\n**Expected Purse Changes:**\n"
+        f"• {team_a_upper}: {format_amount(purse_a)} → {format_amount(purse_a + change_a)} ({change_a_str})\n"
+        f"• {team_b_upper}: {format_amount(purse_b)} → {format_amount(purse_b + change_b)} ({change_b_str})\n"
+        f"\nClick Confirm to execute the swap."
+    )
 
     await interaction.response.send_message(confirm_msg, view=view, ephemeral=True)
     view.message = await interaction.original_response()
@@ -2063,6 +2144,7 @@ class TradeConfirmView(discord.ui.View):
         to_team: str,
         price: float,
         user_id: int,
+        channel: discord.TextChannel = None,
     ):
         super().__init__(timeout=60)
         self.bot_ref = bot_ref
@@ -2071,6 +2153,7 @@ class TradeConfirmView(discord.ui.View):
         self.to_team = to_team.upper()
         self.price = price
         self.user_id = user_id
+        self.channel = channel
         self.message: Optional[discord.Message] = None
 
     async def on_timeout(self):
@@ -2096,14 +2179,23 @@ class TradeConfirmView(discord.ui.View):
         success, msg = self.bot_ref.auction_manager.trade_player(
             self.player, self.from_team, self.to_team, self.price
         )
-        # Disable buttons and update message
+        # Disable buttons and update admin message
         for item in self.children:
             item.disabled = True
 
         try:
-            await interaction.response.edit_message(content=msg, view=self)
+            await interaction.response.edit_message(
+                content="✅ Trade executed! See announcement below.", view=self
+            )
         except Exception:
-            await interaction.response.send_message(msg)
+            pass
+
+        # Send PUBLIC announcement of the trade (visible to everyone)
+        if success and self.channel:
+            public_msg = f"📢 **TRADE COMPLETED**\n{msg}"
+            await self.channel.send(public_msg)
+        elif success:
+            await interaction.followup.send(msg)
 
         # Update stats and trade log if success
         if success:
@@ -2139,6 +2231,7 @@ class SwapConfirmView(discord.ui.View):
         compensation: float,
         compensation_from: str,
         user_id: int,
+        channel: discord.TextChannel = None,
     ):
         super().__init__(timeout=60)
         self.bot_ref = bot_ref
@@ -2149,6 +2242,7 @@ class SwapConfirmView(discord.ui.View):
         self.compensation = compensation
         self.compensation_from = compensation_from
         self.user_id = user_id
+        self.channel = channel
         self.message: Optional[discord.Message] = None
 
     async def on_timeout(self):
@@ -2183,9 +2277,18 @@ class SwapConfirmView(discord.ui.View):
             item.disabled = True
 
         try:
-            await interaction.response.edit_message(content=msg, view=self)
+            await interaction.response.edit_message(
+                content="✅ Swap executed! See announcement below.", view=self
+            )
         except Exception:
-            await interaction.response.send_message(msg)
+            pass
+
+        # Send PUBLIC announcement of the swap (visible to everyone)
+        if success and self.channel:
+            public_msg = f"📢 **SWAP COMPLETED**\n{msg}"
+            await self.channel.send(public_msg)
+        elif success:
+            await interaction.followup.send(msg)
 
         if success:
             self.bot_ref.create_background_task(self.bot_ref.update_stats_display())
