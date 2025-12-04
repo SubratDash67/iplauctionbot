@@ -3,6 +3,7 @@
 Discord Auction Bot - Main Application
 Modern bot with Slash Commands and User-Team Mapping
 Users are assigned to teams and can simply use /bid
+Single persistent paginated trade-log message (Prev/Next)
 """
 
 import discord
@@ -12,7 +13,7 @@ import asyncio
 import os
 import time
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -141,6 +142,14 @@ class AuctionBot(commands.Bot):
 
 
 bot = AuctionBot()
+
+# Defensive: attempt to remove old registrations to avoid CommandAlreadyRegistered
+# (helps when reloading during development)
+for cmdname in ("settradechannel", "tradelog"):
+    try:
+        bot.tree.remove_command(cmdname)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -399,6 +408,8 @@ async def team_bid_history(
 @bot.tree.command(name="teamsquad", description="Show players in your team")
 async def team_squad(interaction: discord.Interaction):
     """Shows the squad for the user's assigned team"""
+    from config import TEAM_SLOTS
+
     user_id = interaction.user.id
     team_upper = bot.user_teams.get(user_id)
 
@@ -415,7 +426,13 @@ async def team_squad(interaction: discord.Interaction):
     squad = detailed_squads.get(team_upper, [])
     purse = teams_purse.get(team_upper, 0)
 
-    msg = bot.formatter.format_squad_display(team_upper, squad, purse)
+    slots = TEAM_SLOTS.get(team_upper, {"available": 0, "overseas": 0})
+    available_slots = slots["available"]
+    overseas_slots = slots["overseas"]
+
+    msg = bot.formatter.format_squad_display(
+        team_upper, squad, purse, available_slots, overseas_slots
+    )
     await interaction.response.send_message(msg)
 
 
@@ -423,7 +440,7 @@ async def team_squad(interaction: discord.Interaction):
 @app_commands.describe(team="Team Code (e.g. MI, CSK)")
 async def view_squad(interaction: discord.Interaction, team: str):
     """View any team's squad - available to all users"""
-    from config import TEAMS
+    from config import TEAMS, TEAM_SLOTS
 
     team_upper = team.upper()
 
@@ -437,7 +454,13 @@ async def view_squad(interaction: discord.Interaction, team: str):
     squad = detailed_squads.get(team_upper, [])
     purse = teams_purse.get(team_upper, 0)
 
-    msg = bot.formatter.format_squad_display(team_upper, squad, purse)
+    slots = TEAM_SLOTS.get(team_upper, {"available": 0, "overseas": 0})
+    available_slots = slots["available"]
+    overseas_slots = slots["overseas"]
+
+    msg = bot.formatter.format_squad_display(
+        team_upper, squad, purse, available_slots, overseas_slots
+    )
     await interaction.response.send_message(msg)
 
 
@@ -727,8 +750,8 @@ async def load_retained(interaction: discord.Interaction):
 class ShowListsView(discord.ui.View):
     """Paginated view for /showlists with next/previous buttons"""
 
-    def __init__(self, pages: list, user_id: int):
-        super().__init__(timeout=120)
+    def __init__(self, pages: list, user_id: int, timeout: int = 120):
+        super().__init__(timeout=timeout)
         self.pages = pages
         self.current_page = 0
         self.user_id = user_id
@@ -747,8 +770,11 @@ class ShowListsView(discord.ui.View):
         self.message = None
 
     def update_buttons(self):
-        self.prev_button.disabled = self.current_page == 0
-        self.next_button.disabled = self.current_page >= len(self.pages) - 1
+        try:
+            self.prev_button.disabled = self.current_page == 0
+            self.next_button.disabled = self.current_page >= len(self.pages) - 1
+        except Exception:
+            pass
 
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
     async def prev_button(
@@ -871,39 +897,6 @@ async def show_lists(interaction: discord.Interaction):
         view.message = await interaction.original_response()
 
 
-@bot.tree.command(
-    name="deleteset", description="Delete a set and all its players (Admin only)"
-)
-@app_commands.describe(set_name="Name of the set to delete (e.g., M1, BA1, etc.)")
-@app_commands.checks.has_permissions(administrator=True)
-async def delete_set(interaction: discord.Interaction, set_name: str):
-    if bot.auction_manager.active:
-        await interaction.response.send_message(
-            "Cannot delete sets while auction is active. Stop the auction first.",
-            ephemeral=True,
-        )
-        return
-
-    success, message = bot.auction_manager.delete_set(set_name)
-    await interaction.response.send_message(message, ephemeral=not success)
-
-
-@bot.tree.command(
-    name="setorder", description="Set the order of lists for auction (Admin only)"
-)
-@app_commands.describe(lists="List names separated by spaces")
-@app_commands.checks.has_permissions(administrator=True)
-async def set_order(interaction: discord.Interaction, lists: str):
-    list_names = lists.split()
-    if not list_names:
-        await interaction.response.send_message(
-            "Please provide list names.", ephemeral=True
-        )
-        return
-    success, message = bot.auction_manager.set_list_order(list_names)
-    await interaction.response.send_message(message)
-
-
 # ============================================================
 # AUCTION CONTROL COMMANDS
 # ============================================================
@@ -992,7 +985,7 @@ async def resume_auction(interaction: discord.Interaction):
         msg += "• `/loadsets X` - Load more sets (1-67)\n"
         msg += "• `/showunsold` - View unsold players\n"
         msg += "• `/reauctionall` - Bring all unsold players back\n"
-        msg += "• `/stop` - End the auction completely\n"
+        msg += "• `/stop` - End the auction completely"
         if unsold:
             msg += f"\n📋 **{len(unsold)} unsold players** available for re-auction."
         await interaction.response.send_message(msg, ephemeral=True)
@@ -1415,8 +1408,7 @@ async def move_players(interaction: discord.Interaction, players: str, target_se
 
 
 @bot.tree.command(
-    name="unsoldtime",
-    description="Set the timeout for unsold players (Admin only)",
+    name="unsoldtime", description="Set the timeout for unsold players (Admin only)"
 )
 @app_commands.describe(
     seconds="Seconds before a player with no bids goes unsold (default: 60)",
@@ -1596,7 +1588,7 @@ async def admin_help_command(interaction: discord.Interaction):
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (start_next_player, countdown_loop)
 # ============================================================
 
 
@@ -1867,6 +1859,201 @@ async def countdown_loop(channel: discord.TextChannel):
 # ============================================================
 
 
+@bot.tree.command(
+    name="trade",
+    description="Trade a player from one team to another for cash (Admin only)",
+)
+@app_commands.describe(
+    player="Player name to trade",
+    from_team="Team giving the player (e.g., MI, CSK)",
+    to_team="Team receiving the player",
+    price="Trade price in Crores (e.g., 5 = 5Cr, 0.5 = 50L)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def trade_command(
+    interaction: discord.Interaction,
+    player: str,
+    from_team: str,
+    to_team: str,
+    price: float,
+):
+    """Trade a player between teams with confirmation"""
+    from_team_upper = from_team.upper()
+    to_team_upper = to_team.upper()
+
+    # Validate teams
+    if from_team_upper not in TEAMS:
+        await interaction.response.send_message(
+            f"Invalid source team: {from_team}. Valid teams: {', '.join(TEAMS.keys())}",
+            ephemeral=True,
+        )
+        return
+    if to_team_upper not in TEAMS:
+        await interaction.response.send_message(
+            f"Invalid target team: {to_team}. Valid teams: {', '.join(TEAMS.keys())}",
+            ephemeral=True,
+        )
+        return
+
+    if from_team_upper == to_team_upper:
+        await interaction.response.send_message(
+            "Cannot trade a player to the same team!", ephemeral=True
+        )
+        return
+
+    # Check overseas limit before showing confirmation
+    is_overseas = bot.auction_manager.db.get_player_overseas_status(player)
+    if is_overseas:
+        from config import MAX_OVERSEAS_LIMIT
+
+        to_team_overseas = bot.auction_manager.db.get_overseas_count(to_team_upper)
+        if to_team_overseas >= MAX_OVERSEAS_LIMIT:
+            await interaction.response.send_message(
+                f"❌ **{to_team_upper}** already has {MAX_OVERSEAS_LIMIT} overseas players. Cannot trade overseas player.",
+                ephemeral=True,
+            )
+            return
+
+    # Create confirmation view
+    view = TradeConfirmView(
+        bot, player, from_team_upper, to_team_upper, price, interaction.user.id
+    )
+
+    price_display = format_amount(int(price * 10_000_000))
+    overseas_tag = " ✈️(Overseas)" if is_overseas else ""
+
+    confirm_msg = (
+        f"**Confirm Trade:**\n"
+        f"• Player: **{player}**{overseas_tag}\n"
+        f"• From: **{from_team_upper}**\n"
+        f"• To: **{to_team_upper}**\n"
+        f"• Price: **{price_display}**\n\n"
+        f"Click Confirm to execute the trade."
+    )
+
+    await interaction.response.send_message(confirm_msg, view=view, ephemeral=True)
+    view.message = await interaction.original_response()
+
+
+@bot.tree.command(
+    name="swap", description="Swap two players between teams (Admin only)"
+)
+@app_commands.describe(
+    player_a="First player (moving from team_a to team_b)",
+    team_a="Team giving player_a",
+    player_b="Second player (moving from team_b to team_a)",
+    team_b="Team giving player_b",
+    compensation="Compensation amount in Crores (optional, default: 0)",
+    compensation_from="Team paying compensation: team_a or team_b (optional)",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def swap_command(
+    interaction: discord.Interaction,
+    player_a: str,
+    team_a: str,
+    player_b: str,
+    team_b: str,
+    compensation: float = 0.0,
+    compensation_from: str = None,
+):
+    """Swap two players between teams with confirmation"""
+    team_a_upper = team_a.upper()
+    team_b_upper = team_b.upper()
+
+    # Validate teams
+    if team_a_upper not in TEAMS:
+        await interaction.response.send_message(
+            f"Invalid team: {team_a}. Valid teams: {', '.join(TEAMS.keys())}",
+            ephemeral=True,
+        )
+        return
+    if team_b_upper not in TEAMS:
+        await interaction.response.send_message(
+            f"Invalid team: {team_b}. Valid teams: {', '.join(TEAMS.keys())}",
+            ephemeral=True,
+        )
+        return
+
+    if team_a_upper == team_b_upper:
+        await interaction.response.send_message(
+            "Cannot swap players within the same team!", ephemeral=True
+        )
+        return
+
+    # Check overseas limits before showing confirmation
+    from config import MAX_OVERSEAS_LIMIT
+
+    is_overseas_a = bot.auction_manager.db.get_player_overseas_status(player_a)
+    is_overseas_b = bot.auction_manager.db.get_player_overseas_status(player_b)
+
+    overseas_a = bot.auction_manager.db.get_overseas_count(team_a_upper)
+    overseas_b = bot.auction_manager.db.get_overseas_count(team_b_upper)
+
+    # Calculate post-swap overseas counts
+    new_overseas_a = (
+        overseas_a - (1 if is_overseas_a else 0) + (1 if is_overseas_b else 0)
+    )
+    new_overseas_b = (
+        overseas_b - (1 if is_overseas_b else 0) + (1 if is_overseas_a else 0)
+    )
+
+    if new_overseas_a > MAX_OVERSEAS_LIMIT:
+        await interaction.response.send_message(
+            f"❌ **{team_a_upper}** would exceed overseas limit ({new_overseas_a}/{MAX_OVERSEAS_LIMIT}) after swap",
+            ephemeral=True,
+        )
+        return
+    if new_overseas_b > MAX_OVERSEAS_LIMIT:
+        await interaction.response.send_message(
+            f"❌ **{team_b_upper}** would exceed overseas limit ({new_overseas_b}/{MAX_OVERSEAS_LIMIT}) after swap",
+            ephemeral=True,
+        )
+        return
+
+    # Validate compensation_from if compensation is provided
+    comp_from = None
+    if compensation > 0:
+        if not compensation_from:
+            await interaction.response.send_message(
+                "Please specify which team pays compensation (compensation_from)",
+                ephemeral=True,
+            )
+            return
+        comp_from = compensation_from.upper()
+        if comp_from not in [team_a_upper, team_b_upper]:
+            await interaction.response.send_message(
+                f"compensation_from must be either {team_a_upper} or {team_b_upper}",
+                ephemeral=True,
+            )
+            return
+
+    # Create confirmation view
+    view = SwapConfirmView(
+        bot,
+        player_a,
+        team_a_upper,
+        player_b,
+        team_b_upper,
+        compensation,
+        comp_from,
+        interaction.user.id,
+    )
+
+    overseas_tag_a = " ✈️" if is_overseas_a else ""
+    overseas_tag_b = " ✈️" if is_overseas_b else ""
+
+    confirm_msg = (
+        f"**Confirm Swap:**\n"
+        f"• **{player_a}**{overseas_tag_a} ({team_a_upper}) ↔ **{player_b}**{overseas_tag_b} ({team_b_upper})\n"
+    )
+    if compensation > 0 and comp_from:
+        confirm_msg += f"• Compensation: **{comp_from}** pays **{format_amount(int(compensation * 10_000_000))}**\n"
+    confirm_msg += "\nClick Confirm to execute the swap."
+
+    await interaction.response.send_message(confirm_msg, view=view, ephemeral=True)
+    view.message = await interaction.original_response()
+
+
 class TradeConfirmView(discord.ui.View):
     def __init__(
         self,
@@ -2022,110 +2209,108 @@ class SwapConfirmView(discord.ui.View):
             await interaction.response.send_message("Swap cancelled.", ephemeral=True)
 
 
-@bot.tree.command(
-    name="trade", description="Trade a player between teams for cash (Admin only)"
-)
-@app_commands.describe(
-    player="Player Name",
-    from_team="Source Team",
-    to_team="Target Team",
-    price="Trade Value in Crores (e.g., 2 = 2Cr, 0.5 = 50L)",
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def trade(
-    interaction: discord.Interaction,
-    player: str,
-    from_team: str,
-    to_team: str,
-    price: float,
-):
-    # Build confirmation showing purses
-    await interaction.response.defer(ephemeral=True)
-
-    teams = bot.auction_manager.db.get_teams()
-    from_purse = teams.get(from_team.upper(), 0)
-    to_purse = teams.get(to_team.upper(), 0)
-    price_rupees = int(price * 10_000_000)
-
-    embed = discord.Embed(
-        title="Confirm Cash Trade",
-        description=f"Trade **{player}** from **{from_team.upper()}** → **{to_team.upper()}** for **{format_amount(price_rupees)}**",
-        color=discord.Color.orange(),
-    )
-    embed.add_field(
-        name=f"{from_team.upper()} Purse",
-        value=f"{format_amount(from_purse)}",
-        inline=True,
-    )
-    embed.add_field(
-        name=f"{to_team.upper()} Purse", value=f"{format_amount(to_purse)}", inline=True
-    )
-    embed.set_footer(text="Confirm to execute the trade. This action is logged.")
-
-    view = TradeConfirmView(bot, player, from_team, to_team, price, interaction.user.id)
-    msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-    view.message = msg
+# --------------------------
+# Trade Log single-message pagination helpers (exactly one message)
+# --------------------------
 
 
-@bot.tree.command(
-    name="swaptrade", description="Swap two players between teams (Admin only)"
-)
-@app_commands.describe(
-    player_a="First player name (from Team A)",
-    team_a="Team A (giving player_a)",
-    player_b="Second player name (from Team B)",
-    team_b="Team B (giving player_b)",
-    compensation="Compensation amount in Crores (optional, if values differ)",
-    compensation_from="Team paying compensation (A or B, optional)",
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def swaptrade(
-    interaction: discord.Interaction,
-    player_a: str,
-    team_a: str,
-    player_b: str,
-    team_b: str,
-    compensation: float = 0.0,
-    compensation_from: str = None,
-):
-    await interaction.response.defer(ephemeral=True)
+def paginate_long_message(content: str, max_size: int = 1900) -> List[str]:
+    """Split content into safe pages, attempting to cut on blank lines or newlines."""
+    if not content:
+        return ["(No trades yet)"]
+    pages: List[str] = []
+    blocks = content.split("\n\n")
+    current = ""
+    for blk in blocks:
+        cand_block = blk.rstrip()
+        candidate = (current + "\n\n" + cand_block) if current else cand_block
+        if len(candidate) <= max_size:
+            current = candidate
+        else:
+            if current:
+                pages.append(current)
+            # If a single block is too large, split by lines
+            if len(cand_block) > max_size:
+                lines = cand_block.split("\n")
+                chunk = ""
+                for line in lines:
+                    cand = (chunk + "\n" + line) if chunk else line
+                    if len(cand) <= max_size:
+                        chunk = cand
+                    else:
+                        if chunk:
+                            pages.append(chunk)
+                        chunk = line
+                if chunk:
+                    pages.append(chunk)
+                current = ""
+            else:
+                current = cand_block
+    if current:
+        pages.append(current)
+    # Add footer with page numbers
+    for i in range(len(pages)):
+        pages[i] = pages[i] + f"\n\n*Page {i+1}/{len(pages)}*"
+    return pages
 
-    teams = bot.auction_manager.db.get_teams()
-    purse_a = teams.get(team_a.upper(), 0)
-    purse_b = teams.get(team_b.upper(), 0)
-    comp_rupees = int(compensation * 10_000_000) if compensation else 0
 
-    embed = discord.Embed(
-        title="Confirm Swap Trade",
-        description=f"Swap **{player_a}** ({team_a.upper()}) ↔ **{player_b}** ({team_b.upper()})",
-        color=discord.Color.orange(),
-    )
-    embed.add_field(
-        name=f"{team_a.upper()} Purse", value=f"{format_amount(purse_a)}", inline=True
-    )
-    embed.add_field(
-        name=f"{team_b.upper()} Purse", value=f"{format_amount(purse_b)}", inline=True
-    )
-    if comp_rupees > 0 and compensation_from:
-        embed.add_field(
-            name="Compensation",
-            value=f"{format_amount(comp_rupees)} (paid by {compensation_from})",
-            inline=False,
+class TradeLogView(discord.ui.View):
+    """A View that edits a single message's content to show multiple pages."""
+
+    def __init__(self, pages: List[str], owner_id: Optional[int] = None):
+        super().__init__(timeout=None)
+        self.pages = pages
+        self.index = 0
+        self.message: Optional[discord.Message] = None
+        self.owner_id = owner_id
+        self._refresh_buttons()
+
+    def _refresh_buttons(self):
+        # Guard: the buttons will be attached by discord, but we may not have them yet.
+        try:
+            self.prev_button.disabled = self.index == 0
+            self.next_button.disabled = self.index >= len(self.pages) - 1
+        except Exception:
+            pass
+
+    async def set_message(self, msg: discord.Message):
+        """Attach the view to an existing message and ensure buttons reflect state."""
+        self.message = msg
+        self._refresh_buttons()
+        try:
+            await msg.edit(content=self.pages[self.index], view=self)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if self.owner_id and interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "You can't use this navigation.", ephemeral=True
+            )
+            return
+        self.index = max(0, self.index - 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            content=self.pages[self.index], view=self
         )
-    embed.set_footer(text="Confirm to execute the swap. This action is logged.")
 
-    view = SwapConfirmView(
-        bot,
-        player_a,
-        team_a,
-        player_b,
-        team_b,
-        compensation,
-        compensation_from,
-        interaction.user.id,
-    )
-    msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-    view.message = msg
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if self.owner_id and interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "You can't use this navigation.", ephemeral=True
+            )
+            return
+        self.index = min(len(self.pages) - 1, self.index + 1)
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            content=self.pages[self.index], view=self
+        )
 
 
 @bot.tree.command(
@@ -2137,23 +2322,38 @@ async def settradechannel(
     interaction: discord.Interaction,
     channel: discord.TextChannel,
 ):
-    """Set the channel where trade log will be displayed and auto-updated"""
-    await interaction.response.defer()
+    """Set the channel where the single-message trade log will live."""
+    await interaction.response.defer(ephemeral=True)
 
-    # Send initial trade log message
     trade_msg = bot.auction_manager.get_trade_log_message()
-    msg = await channel.send(trade_msg)
+    pages = paginate_long_message(trade_msg)
 
-    # Save channel and message IDs
-    bot.auction_manager.set_trade_channel(str(channel.id), str(msg.id))
-
-    await interaction.followup.send(
-        f"✅ Trade log channel set to {channel.mention}. The trade log will auto-update after each trade."
-    )
+    try:
+        if len(pages) == 1:
+            sent = await channel.send(pages[0])
+            bot.auction_manager.set_trade_channel(str(channel.id), str(sent.id))
+            await interaction.followup.send(
+                f"✅ Trade log channel set to {channel.mention}. The trade log will auto-update after each trade.",
+                ephemeral=True,
+            )
+        else:
+            view = TradeLogView(pages)
+            sent = await channel.send(pages[0], view=view)
+            view.message = sent
+            bot.auction_manager.set_trade_channel(str(channel.id), str(sent.id))
+            await interaction.followup.send(
+                f"✅ Trade log channel set to {channel.mention}. A single paginated message was created.",
+                ephemeral=True,
+            )
+    except Exception as e:
+        logger.error(f"Error setting trade channel: {e}")
+        await interaction.followup.send(
+            f"Failed to set trade channel: {e}", ephemeral=True
+        )
 
 
 async def update_trade_log():
-    """Update the trade log message in the configured channel"""
+    """Update the single trade-log message in the configured channel (keeps exactly one message)."""
     try:
         channel_id, message_id = bot.auction_manager.get_trade_channel()
         if not channel_id or not message_id:
@@ -2163,26 +2363,82 @@ async def update_trade_log():
         if not channel:
             return
 
+        trade_content = bot.auction_manager.get_trade_log_message()
+        pages = paginate_long_message(trade_content)
+
+        # Try fetch existing message
+        msg = None
         try:
             msg = await channel.fetch_message(int(message_id))
-            trade_content = bot.auction_manager.get_trade_log_message()
-            await msg.edit(content=trade_content)
         except discord.NotFound:
-            # Message was deleted, send a new one
-            trade_content = bot.auction_manager.get_trade_log_message()
-            new_msg = await channel.send(trade_content)
-            bot.auction_manager.set_trade_channel(channel_id, str(new_msg.id))
+            msg = None
         except Exception as e:
-            logger.error(f"Error updating trade log message: {e}")
+            logger.error(f"Error fetching trade log message: {e}")
+            return
+
+        # If message exists, edit it (attach view if multiple pages)
+        if msg:
+            if len(pages) == 1:
+                try:
+                    # remove any view and edit the single-page content
+                    await msg.edit(content=pages[0], view=None)
+                except discord.HTTPException as err:
+                    logger.warning(
+                        f"Failed to edit trade log message: {err}. Recreating message."
+                    )
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                    new_msg = await channel.send(pages[0])
+                    bot.auction_manager.set_trade_channel(channel_id, str(new_msg.id))
+                return
+            else:
+                # multiple pages -> ensure one message with TradeLogView
+                view = TradeLogView(pages)
+                try:
+                    await msg.edit(content=pages[0], view=view)
+                    view.message = msg
+                except discord.HTTPException as err:
+                    logger.warning(
+                        f"Failed to edit trade log message to paginated view: {err}. Recreating message."
+                    )
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                    new_msg = await channel.send(pages[0], view=view)
+                    view.message = new_msg
+                    bot.auction_manager.set_trade_channel(channel_id, str(new_msg.id))
+                return
+
+        # If message doesn't exist, create a new single message (with view for multi-page)
+        if len(pages) == 1:
+            new_msg = await channel.send(pages[0])
+            bot.auction_manager.set_trade_channel(channel_id, str(new_msg.id))
+        else:
+            view = TradeLogView(pages)
+            new_msg = await channel.send(pages[0], view=view)
+            view.message = new_msg
+            bot.auction_manager.set_trade_channel(channel_id, str(new_msg.id))
+
     except Exception as e:
-        logger.error(f"Error in update_trade_log: {e}")
+        logger.error(f"Error updating trade log message: {e}")
 
 
 @bot.tree.command(name="tradelog", description="Show all trades")
 async def tradelog(interaction: discord.Interaction):
     """Display the trade log"""
     msg = bot.auction_manager.get_trade_log_message()
-    await interaction.response.send_message(msg)
+    # If it's longer than Discord limit, paginate locally using the helper
+    pages = paginate_long_message(msg)
+    if len(pages) == 1:
+        await interaction.response.send_message(pages[0])
+    else:
+        # Send first page with navigation view for the invoking user
+        view = ShowListsView(pages, interaction.user.id)
+        await interaction.response.send_message(pages[0], view=view)
+        view.message = await interaction.original_response()
 
 
 # ============================================================

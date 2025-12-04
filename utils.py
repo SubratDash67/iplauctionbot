@@ -952,89 +952,76 @@ class MessageFormatter:
     @staticmethod
     def format_squad_display(
         team_code: str,
-        squad: List[Tuple[str, int, str, str]],
+        squad: List[Tuple[str, int, str, str, bool]], 
         purse: int,
+        available_slots: int = 0,
+        overseas_slots: int = 0,
     ) -> str:
-        """Format a team's squad for display with overseas indicators.
-
-        Args:
-            team_code: The team code (e.g., 'MI', 'CSK')
-            squad: List of (player, price, acq_type, source) tuples
-            purse: Remaining purse amount
-
-        Returns:
-            Formatted string for Discord display
-        """
-        from config import TEAM_SLOTS, MAX_SQUAD_SIZE
-        from retained_players import is_player_overseas, get_retained_overseas_count
+        """Format a team's squad for display."""
+        from config import MAX_SQUAD_SIZE
+        from config import MAX_OVERSEAS_LIMIT
 
         current_players = len(squad)
-        total_spent = sum(price for _, price, _, _ in squad) if squad else 0
+        
+        # FIX 1: Update sum to unpack 5 values (_, price, _, _, _)
+        total_spent = sum(price for _, price, _, _, _ in squad) if squad else 0
+        
+        # Calculate overseas count (using index 4)
+        overseas_count = sum(1 for row in squad if row[4])
 
-        # Separate players by type and count overseas
-        retained_players = [(p, pr) for p, pr, acq, _ in squad if acq == "retained"]
-        traded_players = [(p, pr, s) for p, pr, acq, s in squad if acq == "traded"]
-        bought_players = [(p, pr) for p, pr, acq, _ in squad if acq == "bought"]
+        # Helper function for formatting rows with the airplane symbol
+        def fmt_row(p, pr, src, iso):
+            symbol = "✈️" if iso else "  "
+            base = f"{symbol} {p:25} : {format_amount(pr)}"
+            if src:
+                base += f" [from {src}]"
+            return base
 
-        # Count overseas players (only from retained - auction data doesn't have this info)
-        overseas_count = 0
-        for player, _ in retained_players:
-            if is_player_overseas(player):
-                overseas_count += 1
-        for player, _, _ in traded_players:
-            if is_player_overseas(player):
-                overseas_count += 1
-
-        # Get slot configuration
-        slots = TEAM_SLOTS.get(team_code, {"overseas": 8, "total": 25})
-        initial_overseas_slots = slots["overseas"]
-        initial_total_slots = slots["total"]
-
-        # Calculate retained counts to determine initial overseas in squad
-        retained_overseas = get_retained_overseas_count(team_code)
-        max_overseas = 8  # IPL max overseas per squad
-        current_overseas_in_squad = overseas_count  # This is what we counted above
+        # FIX 2: Update these comprehensions to unpack 5 items: p, pr, acq, src, iso
+        retained_players = [(p, pr, src, iso) for p, pr, acq, src, iso in squad if acq == "retained"]
+        traded_players = [(p, pr, src, iso) for p, pr, acq, src, iso in squad if acq == "traded"]
+        bought_players = [(p, pr, src, iso) for p, pr, acq, src, iso in squad if acq == "bought"]
 
         msg = f"**{team_code} Squad:**\n```\n"
 
-        def format_player_line(player: str, price: int, suffix: str = "") -> str:
-            """Format player line with overseas indicator"""
-            overseas_marker = "✈️" if is_player_overseas(player) else "  "
-            return f"{overseas_marker} {player:23} : {format_amount(price)}{suffix}\n"
-
         if retained_players:
             msg += "--- Retained ---\n"
-            for player, price in retained_players:
-                msg += format_player_line(player, price)
+            for player, price, source, is_overseas in retained_players:
+                msg += f"{fmt_row(player, price, source, is_overseas)}\n"
 
         if bought_players:
             if retained_players:
                 msg += "\n"
             msg += "--- Bought ---\n"
-            for player, price in bought_players:
-                msg += format_player_line(player, price)
+            for player, price, source, is_overseas in bought_players:
+                msg += f"{fmt_row(player, price, source, is_overseas)}\n"
 
         if traded_players:
             if retained_players or bought_players:
                 msg += "\n"
             msg += "--- Traded ---\n"
-            for player, price, source in traded_players:
-                msg += format_player_line(player, price, f" [from {source}]")
+            for player, price, source, is_overseas in traded_players:
+                msg += f"{fmt_row(player, price, source, is_overseas)}\n"
 
         if not retained_players and not bought_players and not traded_players:
             msg += "No players yet.\n"
+
+        # Count bought players (not retained/traded) for slots calculation
+        bought_count = len(bought_players)
+        slots_remaining = available_slots - bought_count
+        
+        # Calculate remaining overseas slots
+        remaining_overseas = MAX_OVERSEAS_LIMIT - overseas_count
 
         msg += f"\n{'='*50}\n"
         msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
         msg += f"{'Remaining Purse':30} : {format_amount(purse)}\n"
         msg += f"{'Total Players':30} : {current_players}/{MAX_SQUAD_SIZE}\n"
-        msg += (
-            f"{'Overseas Players':30} : {current_overseas_in_squad}/{max_overseas} ✈️\n"
-        )
-        msg += f"{'Slots Available (Total)':30} : {initial_total_slots}\n"
-        msg += f"{'Slots Available (Overseas)':30} : {initial_overseas_slots}\n"
+        msg += f"{'Auction Slots Remaining':30} : {max(0, slots_remaining)}\n"
+        msg += f"{'Overseas Players':30} : {overseas_count}/{MAX_OVERSEAS_LIMIT}\n"
+        msg += f"{'Overseas Slots Remaining':30} : {max(0, remaining_overseas)}\n"
         msg += "```"
-        msg += "\n⚠️ *Manually check overseas slots after auction buys*"
+        msg += "\n⚠️ *Manually verify overseas count after trades/releases/buys*"
         return msg
 
 
@@ -1047,3 +1034,4 @@ def calculate_next_bid(current_bid: int) -> int:
     from config import get_bid_increment
 
     return current_bid + get_bid_increment(current_bid)
+

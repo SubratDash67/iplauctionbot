@@ -55,24 +55,23 @@ TEAMS = {
     "LSG": 229500000,  # 22.95 Cr remaining
 }
 
-# Maximum squad size per IPL rules
+# Maximum squad size (hard limit)
 MAX_SQUAD_SIZE = 25
+MAX_OVERSEAS_LIMIT = 8
 
-# Team Slot Configuration - AVAILABLE overseas and total slots to fill
-# Source: Official IPL 2026 data
-# Note: "overseas" = remaining overseas slots available to buy
-#       "total" = remaining total slots available to buy
+# Team Slot Configuration - Available slots and Overseas slots for auction
+# These are REMAINING slots available for buying in auction (not total squad capacity)
 TEAM_SLOTS = {
-    "CSK": {"overseas": 4, "total": 9},
-    "DC": {"overseas": 5, "total": 8},
-    "GT": {"overseas": 4, "total": 5},
-    "KKR": {"overseas": 6, "total": 13},
-    "LSG": {"overseas": 4, "total": 6},
-    "MI": {"overseas": 1, "total": 5},
-    "PBKS": {"overseas": 2, "total": 4},
-    "RCB": {"overseas": 2, "total": 8},
-    "RR": {"overseas": 1, "total": 9},
-    "SRH": {"overseas": 2, "total": 10},
+    "CSK": {"available": 9, "overseas": 4},
+    "DC": {"available": 8, "overseas": 5},
+    "GT": {"available": 5, "overseas": 4},
+    "KKR": {"available": 13, "overseas": 6},
+    "LSG": {"available": 6, "overseas": 4},
+    "MI": {"available": 5, "overseas": 1},
+    "PBKS": {"available": 4, "overseas": 2},
+    "RCB": {"available": 8, "overseas": 2},
+    "RR": {"available": 9, "overseas": 1},
+    "SRH": {"available": 10, "overseas": 2},
 }
 
 
@@ -112,3 +111,4 @@ MESSAGES = {
     "countdown_started": "Starting countdown... {seconds} seconds remaining",
     "list_complete": "List {list_name} has been completed.",
 }
+

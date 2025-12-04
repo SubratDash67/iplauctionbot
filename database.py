@@ -86,6 +86,19 @@ class Database:
                 cursor.execute("ALTER TABLE team_squads ADD COLUMN source_team TEXT")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+            try:
+                cursor.execute(
+                    "ALTER TABLE team_squads ADD COLUMN is_overseas INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cursor.execute(
+                    "ALTER TABLE player_lists ADD COLUMN is_overseas INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
 
             # Global unique constraint: player can only be in ONE team across all teams
             try:
@@ -410,11 +423,34 @@ class Database:
         price: int,
         acquisition_type: str = "bought",
         source_team: str = None,
+        is_overseas: bool = False,
     ) -> bool:
-        """Add a player to team's squad."""
+        """Add a player to team's squad. Enforces MAX_SQUAD_SIZE limit of 25 and overseas limit of 8."""
+        from config import MAX_SQUAD_SIZE, MAX_OVERSEAS_LIMIT
+
         try:
             with self._transaction() as conn:
                 cursor = conn.cursor()
+
+                # Check squad size limit (hard limit of 25)
+                cursor.execute(
+                    "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ?",
+                    (team_code,),
+                )
+                current_count = cursor.fetchone()["cnt"]
+                if current_count >= MAX_SQUAD_SIZE:
+                    return False  # Squad full
+
+                # Check overseas limit (8 max)
+                if is_overseas:
+                    cursor.execute(
+                        "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ? AND is_overseas = 1",
+                        (team_code,),
+                    )
+                    overseas_count = cursor.fetchone()["cnt"]
+                    if overseas_count >= MAX_OVERSEAS_LIMIT:
+                        return False  # Overseas limit reached
+
                 cursor.execute(
                     "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
                     (player_name,),
@@ -424,9 +460,16 @@ class Database:
                     return False
 
                 cursor.execute(
-                    """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (team_code, player_name, price, acquisition_type, source_team),
+                    """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team, is_overseas) 
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        team_code,
+                        player_name,
+                        price,
+                        acquisition_type,
+                        source_team,
+                        1 if is_overseas else 0,
+                    ),
                 )
                 return True
         except sqlite3.IntegrityError:
@@ -449,7 +492,8 @@ class Database:
             cursor.execute(
                 """SELECT player_name, price, 
                           COALESCE(acquisition_type, 'bought') as acquisition_type,
-                          source_team 
+                          source_team,
+                          is_overseas
                    FROM team_squads WHERE team_code = ? ORDER BY bought_at""",
                 (team_code,),
             )
@@ -459,6 +503,7 @@ class Database:
                     row["price"],
                     row["acquisition_type"],
                     row["source_team"],
+                    bool(row["is_overseas"]),
                 )
                 for row in cursor.fetchall()
             ]
@@ -1183,20 +1228,40 @@ class Database:
 
     def trade_player(
         self, player_name: str, from_team: str, to_team: str, price: int
-    ) -> bool:
+    ) -> Tuple[bool, str]:
+        """Trade a player from one team to another for cash.
+        Returns (success, error_message)
+        """
+        from config import MAX_OVERSEAS_LIMIT
+
         with self._transaction() as conn:
             cursor = conn.cursor()
 
             cursor.execute(
-                "SELECT id, price, player_name FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                # Added is_overseas to selection
+                "SELECT id, price, player_name, is_overseas FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
                 (from_team, player_name),
             )
             row = cursor.fetchone()
             if not row:
-                return False
+                return False, f"Player '{player_name}' not found in {from_team}'s squad"
 
             original_price = row["price"]
             actual_player_name = row["player_name"]
+            is_overseas = bool(row["is_overseas"])
+
+            # Check overseas limit for receiving team if player is overseas
+            if is_overseas:
+                cursor.execute(
+                    "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ? AND is_overseas = 1",
+                    (to_team,),
+                )
+                to_team_overseas = cursor.fetchone()["cnt"]
+                if to_team_overseas >= MAX_OVERSEAS_LIMIT:
+                    return (
+                        False,
+                        f"{to_team} already has {MAX_OVERSEAS_LIMIT} overseas players",
+                    )
 
             cursor.execute(
                 "SELECT purse FROM teams WHERE team_code = ?",
@@ -1204,7 +1269,7 @@ class Database:
             )
             target_purse = cursor.fetchone()
             if not target_purse or target_purse["purse"] < price:
-                return False
+                return False, f"{to_team} doesn't have enough purse for this trade"
 
             cursor.execute(
                 "DELETE FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
@@ -1222,9 +1287,16 @@ class Database:
             )
 
             cursor.execute(
-                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
-                   VALUES (?, ?, ?, 'traded', ?)""",
-                (to_team, actual_player_name, price, from_team),
+                # Added is_overseas column and value
+                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team, is_overseas) 
+                   VALUES (?, ?, ?, 'traded', ?, ?)""",
+                (
+                    to_team,
+                    actual_player_name,
+                    price,
+                    from_team,
+                    1 if is_overseas else 0,
+                ),
             )
 
             cursor.execute(
@@ -1233,7 +1305,7 @@ class Database:
                 (actual_player_name, from_team, to_team, price, original_price),
             )
 
-            return True
+            return True, "Trade successful"
 
     def swap_players(
         self,
@@ -1263,12 +1335,14 @@ class Database:
         Returns:
             Tuple of (success, message)
         """
+        from config import MAX_OVERSEAS_LIMIT
+
         with self._transaction() as conn:
             cursor = conn.cursor()
 
-            # Get player A details from team A
+            # Get player A details from team A (including overseas status)
             cursor.execute(
-                "SELECT id, price, player_name FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                "SELECT id, price, player_name, is_overseas FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
                 (team_a, player_a),
             )
             row_a = cursor.fetchone()
@@ -1277,10 +1351,11 @@ class Database:
 
             price_a = row_a["price"]
             actual_name_a = row_a["player_name"]
+            is_overseas_a = bool(row_a["is_overseas"])
 
-            # Get player B details from team B
+            # Get player B details from team B (including overseas status)
             cursor.execute(
-                "SELECT id, price, player_name FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
+                "SELECT id, price, player_name, is_overseas FROM team_squads WHERE team_code = ? AND LOWER(player_name) = LOWER(?)",
                 (team_b, player_b),
             )
             row_b = cursor.fetchone()
@@ -1289,6 +1364,40 @@ class Database:
 
             price_b = row_b["price"]
             actual_name_b = row_b["player_name"]
+            is_overseas_b = bool(row_b["is_overseas"])
+
+            # Check overseas limits for the swap
+            # Count current overseas for both teams
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ? AND is_overseas = 1",
+                (team_a,),
+            )
+            overseas_a = cursor.fetchone()["cnt"]
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ? AND is_overseas = 1",
+                (team_b,),
+            )
+            overseas_b = cursor.fetchone()["cnt"]
+
+            # After swap: Team A loses player_a, gains player_b
+            # Team B loses player_b, gains player_a
+            new_overseas_a = (
+                overseas_a - (1 if is_overseas_a else 0) + (1 if is_overseas_b else 0)
+            )
+            new_overseas_b = (
+                overseas_b - (1 if is_overseas_b else 0) + (1 if is_overseas_a else 0)
+            )
+
+            if new_overseas_a > MAX_OVERSEAS_LIMIT:
+                return (
+                    False,
+                    f"{team_a} would exceed overseas limit ({new_overseas_a}/{MAX_OVERSEAS_LIMIT}) after swap",
+                )
+            if new_overseas_b > MAX_OVERSEAS_LIMIT:
+                return (
+                    False,
+                    f"{team_b} would exceed overseas limit ({new_overseas_b}/{MAX_OVERSEAS_LIMIT}) after swap",
+                )
 
             # Per IPL swap rules:
             # - The price DIFFERENCE is transferred from team getting higher-valued player
@@ -1382,25 +1491,27 @@ class Database:
                     (price_difference, team_receiving_diff),
                 )
 
-            # Add players to new teams (keeping their original salaries)
+            # Add players to new teams (keeping their original salaries and overseas status)
             cursor.execute(
-                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
-                   VALUES (?, ?, ?, 'traded', ?)""",
+                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team, is_overseas) 
+                   VALUES (?, ?, ?, 'traded', ?, ?)""",
                 (
                     team_b,
                     actual_name_a,
                     price_a,
                     team_a,
+                    1 if is_overseas_a else 0,
                 ),  # Player A goes to Team B at their salary
             )
             cursor.execute(
-                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team) 
-                   VALUES (?, ?, ?, 'traded', ?)""",
+                """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, source_team, is_overseas) 
+                   VALUES (?, ?, ?, 'traded', ?, ?)""",
                 (
                     team_a,
                     actual_name_b,
                     price_b,
                     team_b,
+                    1 if is_overseas_b else 0,
                 ),  # Player B goes to Team A at their salary
             )
 
@@ -1624,93 +1735,62 @@ class Database:
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_team_bid_summary_by_player(
-        self, team_code: str, limit: int = 20
-    ) -> List[dict]:
-        """Get bid summary for each player a team bid on.
-
-        Returns list of dicts with:
-        - player_name: Player name
-        - entry_bid: First bid amount by this team
-        - exit_bid: Last bid amount by this team
-        - won: True if this team won the player
-        - final_price: Final sale price (if sold)
-        """
+    def get_team_bid_summary(self, team_code: str, limit: int = 20) -> List[dict]:
+        """Get summarized bid history per player for a team.
+        Shows first bid (entry), last bid (exit/win), and whether they won."""
         with self._transaction() as conn:
             cursor = conn.cursor()
-
-            # Get distinct players this team bid on (most recent first)
+            # Get distinct players this team bid on, with first/last bid amounts
             cursor.execute(
                 """
-                SELECT DISTINCT player_name, MIN(timestamp) as first_ts
-                FROM bid_history 
-                WHERE team_code = ?
-                GROUP BY player_name
-                ORDER BY first_ts DESC
+                SELECT 
+                    bh.player_name,
+                    MIN(bh.amount) as first_bid,
+                    MAX(bh.amount) as last_bid,
+                    MIN(bh.timestamp) as first_time,
+                    MAX(bh.timestamp) as last_time
+                FROM bid_history bh
+                WHERE bh.team_code = ?
+                GROUP BY bh.player_name
+                ORDER BY MAX(bh.timestamp) DESC
                 LIMIT ?
                 """,
                 (team_code, limit),
             )
-            players = [row["player_name"] for row in cursor.fetchall()]
+            rows = cursor.fetchall()
 
+            # Now check if team won each player
             results = []
-            for player_name in players:
-                # Get entry (first) bid
+            for row in rows:
+                player_name = row["player_name"]
+                # Check if this team owns this player
                 cursor.execute(
-                    """
-                    SELECT amount FROM bid_history 
-                    WHERE team_code = ? AND player_name = ?
-                    ORDER BY timestamp ASC LIMIT 1
-                    """,
-                    (team_code, player_name),
-                )
-                entry_row = cursor.fetchone()
-                entry_bid = entry_row["amount"] if entry_row else 0
-
-                # Get exit (last) bid
-                cursor.execute(
-                    """
-                    SELECT amount FROM bid_history 
-                    WHERE team_code = ? AND player_name = ?
-                    ORDER BY timestamp DESC LIMIT 1
-                    """,
-                    (team_code, player_name),
-                )
-                exit_row = cursor.fetchone()
-                exit_bid = exit_row["amount"] if exit_row else 0
-
-                # Check if team won this player
-                cursor.execute(
-                    """
-                    SELECT team_code, final_price FROM sales 
-                    WHERE LOWER(player_name) = LOWER(?)
-                    AND team_code != 'UNSOLD' 
-                    AND team_code != 'RELEASED'
-                    AND player_name NOT LIKE '%(TRADE%'
-                    AND player_name NOT LIKE '%(RELEASED%'
-                    ORDER BY sold_at DESC LIMIT 1
-                    """,
+                    "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
                     (player_name,),
                 )
-                sale_row = cursor.fetchone()
-
-                won = False
-                final_price = 0
-                if sale_row:
-                    won = sale_row["team_code"] == team_code
-                    final_price = sale_row["final_price"]
+                owner = cursor.fetchone()
+                won = owner and owner["team_code"] == team_code
 
                 results.append(
                     {
                         "player_name": player_name,
-                        "entry_bid": entry_bid,
-                        "exit_bid": exit_bid,
+                        "first_bid": row["first_bid"],
+                        "last_bid": row["last_bid"],
                         "won": won,
-                        "final_price": final_price if won else exit_bid,
                     }
                 )
 
             return results
+
+    def get_squad_count(self, team_code: str) -> int:
+        """Get current squad size for a team"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ?",
+                (team_code,),
+            )
+            return cursor.fetchone()["cnt"]
 
     def reauction_multiple_players(self, player_ids: List[int]) -> int:
         with self._transaction() as conn:
@@ -1781,10 +1861,47 @@ class Database:
     # ==================== ATOMIC SALE OPERATIONS ====================
 
     def finalize_sale_atomic(
-        self, player_name: str, team_code: str, amount: int, bid_count: int
+        self,
+        player_name: str,
+        team_code: str,
+        amount: int,
+        bid_count: int,
+        is_overseas: bool = False,
     ) -> Tuple[bool, str]:
+        """Finalize a sale atomically.
+
+        Note: is_overseas should be passed from auction Excel data if available.
+        For auction players, overseas status must be tracked in player_lists or passed explicitly.
+        """
+        from config import MAX_SQUAD_SIZE, MAX_OVERSEAS_LIMIT
+
         with self._transaction() as conn:
             cursor = conn.cursor()
+
+            # Check squad size limit first (hard limit of 25)
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ?",
+                (team_code,),
+            )
+            current_count = cursor.fetchone()["cnt"]
+            if current_count >= MAX_SQUAD_SIZE:
+                return (
+                    False,
+                    f"Squad full! {team_code} already has {MAX_SQUAD_SIZE} players",
+                )
+
+            # Check overseas limit if player is overseas
+            if is_overseas:
+                cursor.execute(
+                    "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ? AND is_overseas = 1",
+                    (team_code,),
+                )
+                overseas_count = cursor.fetchone()["cnt"]
+                if overseas_count >= MAX_OVERSEAS_LIMIT:
+                    return (
+                        False,
+                        f"Overseas limit reached! {team_code} already has {MAX_OVERSEAS_LIMIT} overseas players",
+                    )
 
             cursor.execute(
                 "SELECT team_code FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
@@ -1803,9 +1920,9 @@ class Database:
 
             try:
                 cursor.execute(
-                    """INSERT INTO team_squads (team_code, player_name, price, acquisition_type) 
-                       VALUES (?, ?, ?, 'bought')""",
-                    (team_code, player_name, amount),
+                    """INSERT INTO team_squads (team_code, player_name, price, acquisition_type, is_overseas) 
+                       VALUES (?, ?, ?, 'bought', ?)""",
+                    (team_code, player_name, amount, 1 if is_overseas else 0),
                 )
             except sqlite3.IntegrityError:
                 return False, "Player already exists in a squad"
@@ -1873,3 +1990,67 @@ class Database:
                 (new_price, list_name),
             )
             return cursor.rowcount
+
+    def update_overseas_status(self, player_name: str, is_overseas: bool):
+        """Force update overseas status for an existing player"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            val = 1 if is_overseas else 0
+            cursor.execute(
+                "UPDATE team_squads SET is_overseas = ? WHERE LOWER(player_name) = LOWER(?)",
+                (val, player_name),
+            )
+
+    def get_overseas_count(self, team_code: str) -> int:
+        """Get count of overseas players in a team's squad"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ? AND is_overseas = 1",
+                (team_code,),
+            )
+            return cursor.fetchone()["cnt"]
+
+    def get_player_overseas_status(self, player_name: str) -> bool:
+        """Check if a player is overseas"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT is_overseas FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
+            )
+            row = cursor.fetchone()
+            return bool(row["is_overseas"]) if row else False
+
+    def can_add_overseas(self, team_code: str) -> bool:
+        """Check if team can add another overseas player"""
+        from config import MAX_OVERSEAS_LIMIT
+
+        return self.get_overseas_count(team_code) < MAX_OVERSEAS_LIMIT
+
+    def get_player_overseas_from_list(self, player_name: str) -> bool:
+        """Get overseas status of a player from player_lists table.
+
+        Note: This is used during auction finalization. If player is not in
+        player_lists or doesn't have overseas data, returns False.
+        Auction Excel should include overseas column for proper tracking.
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT is_overseas FROM player_lists WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
+            )
+            row = cursor.fetchone()
+            return bool(row["is_overseas"]) if row and row["is_overseas"] else False
+
+    def set_player_overseas_in_list(self, player_name: str, is_overseas: bool) -> bool:
+        """Set overseas status for a player in player_lists table"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE player_lists SET is_overseas = ? WHERE LOWER(player_name) = LOWER(?)",
+                (1 if is_overseas else 0, player_name),
+            )
+            return cursor.rowcount > 0
+

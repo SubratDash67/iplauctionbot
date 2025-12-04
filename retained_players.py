@@ -147,7 +147,7 @@ RETAINED_PLAYERS = {
         ("Shashank Singh", 55000000, False),  # 550 L = 5.5 Cr
         ("Shreyas Iyer", 267500000, False),  # 2675 L = 26.75 Cr
         ("Suryansh Shedge", 3000000, False),  # 30 L
-        ("Vishnu Vinod", 9500000, False),  # 95 L
+        ("Vishnu Vinod", 9500000),  # 95 L
         ("Vyshak Vijaykumar", 18000000, False),  # 180 L = 1.8 Cr
         ("Xavier Bartlett", 8000000, True),  # 80 L *
         ("Yash Thakur", 16000000, False),  # 160 L = 1.6 Cr
@@ -234,51 +234,3 @@ def get_remaining_purse(team_code: str, initial_purse: int) -> int:
     """
     return initial_purse
 
-
-def is_player_overseas(player_name: str) -> bool:
-    """Check if a retained player is overseas.
-
-    Returns True if player is overseas, False if Indian or not found in retained list.
-    Note: This only works for retained players. Auction players don't have overseas data.
-    """
-    player_lower = player_name.lower().strip()
-
-    for team_code, players in RETAINED_PLAYERS.items():
-        for player_data in players:
-            if len(player_data) >= 3:
-                name, salary, is_overseas = player_data
-                if name.lower().strip() == player_lower:
-                    return is_overseas
-            elif len(player_data) == 2:
-                # Old format without overseas flag - assume Indian
-                name, salary = player_data
-                if name.lower().strip() == player_lower:
-                    return False
-    return False
-
-
-def get_retained_overseas_count(team_code: str) -> int:
-    """Count overseas players in a team's retained list."""
-    if team_code not in RETAINED_PLAYERS:
-        return 0
-
-    count = 0
-    for player_data in RETAINED_PLAYERS[team_code]:
-        if len(player_data) >= 3 and player_data[2]:  # is_overseas is True
-            count += 1
-    return count
-
-
-def get_all_overseas_players() -> dict:
-    """Get all overseas retained players organized by team.
-
-    Returns dict: {team_code: [list of overseas player names]}
-    """
-    result = {}
-    for team_code, players in RETAINED_PLAYERS.items():
-        overseas = []
-        for player_data in players:
-            if len(player_data) >= 3 and player_data[2]:  # is_overseas is True
-                overseas.append(player_data[0])
-        result[team_code] = overseas
-    return result
