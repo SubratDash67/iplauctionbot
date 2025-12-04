@@ -233,7 +233,9 @@ class FileManager:
 
         # Sheet 2: Team Summary
         team_sheet = wb.create_sheet("Team Summary")
-        team_sheet.append(["Team", "Players Bought", "Total Spent", "Remaining Purse"])
+        team_sheet.append(
+            ["Team", "Players", "Overseas", "Total Spent", "Remaining Purse"]
+        )
         for cell in team_sheet[1]:
             cell.fill = header_fill
             cell.font = header_font
@@ -317,10 +319,19 @@ class FileManager:
 
                 retained = retained_data.get(team_code, [])
                 total_spent = 0
-                for player_name, price in retained:
-                    safe_player = sanitize_csv_value(player_name)
+                overseas_count = 0
+                for item in retained:
+                    # Handle both (player, price) and (player, price, is_overseas) formats
+                    player_name = item[0]
+                    price = item[1]
+                    is_overseas = item[2] if len(item) > 2 else False
+
+                    display_name = f"✈️ {player_name}" if is_overseas else player_name
+                    safe_player = sanitize_csv_value(display_name)
                     ts.append([safe_player, format_amount(price), "Retained"])
                     total_spent += price
+                    if is_overseas:
+                        overseas_count += 1
 
                 # Summary rows
                 ts.append([])
@@ -328,6 +339,7 @@ class FileManager:
 
                 summary_row = ts.max_row + 1
                 ts.append(["Total Players", len(retained), ""])
+                ts.append(["Overseas Players", overseas_count, ""])
                 ts.append(["Total Spent", format_amount(total_spent), ""])
                 ts.append(["Purse Remaining", format_amount(purse_left), ""])
 
@@ -345,7 +357,7 @@ class FileManager:
                 del wb["Team Summary"]
             summary_sheet = wb.create_sheet("Team Summary", 1)
             summary_sheet.append(
-                ["Team", "Players Bought", "Total Spent", "Remaining Purse"]
+                ["Team", "Players", "Overseas", "Total Spent", "Remaining Purse"]
             )
             for cell in summary_sheet[1]:
                 cell.fill = header_fill
@@ -354,12 +366,18 @@ class FileManager:
 
             for team_code in sorted(TEAM_CONFIG.keys()):
                 retained = retained_data.get(team_code, [])
-                total_spent = sum(price for _, price in retained)
+                total_spent = 0
+                overseas_count = 0
+                for item in retained:
+                    total_spent += item[1]
+                    if len(item) > 2 and item[2]:
+                        overseas_count += 1
                 remaining = teams.get(team_code, 0)
                 summary_sheet.append(
                     [
                         team_code,
                         len(retained),
+                        overseas_count,
                         format_amount(total_spent),
                         format_amount(remaining),
                     ]
