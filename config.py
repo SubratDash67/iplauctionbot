@@ -55,8 +55,13 @@ TEAMS = {
     "LSG": 229500000,  # 22.95 Cr remaining
 }
 
-# Team Slot Configuration - Overseas and Total slots available
+# Maximum squad size per IPL rules
+MAX_SQUAD_SIZE = 25
+
+# Team Slot Configuration - AVAILABLE overseas and total slots to fill
 # Source: Official IPL 2026 data
+# Note: "overseas" = remaining overseas slots available to buy
+#       "total" = remaining total slots available to buy
 TEAM_SLOTS = {
     "CSK": {"overseas": 4, "total": 9},
     "DC": {"overseas": 5, "total": 8},

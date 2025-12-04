@@ -955,7 +955,7 @@ class MessageFormatter:
         squad: List[Tuple[str, int, str, str]],
         purse: int,
     ) -> str:
-        """Format a team's squad for display.
+        """Format a team's squad for display with overseas indicators.
 
         Args:
             team_code: The team code (e.g., 'MI', 'CSK')
@@ -965,34 +965,61 @@ class MessageFormatter:
         Returns:
             Formatted string for Discord display
         """
+        from config import TEAM_SLOTS, MAX_SQUAD_SIZE
+        from retained_players import is_player_overseas, get_retained_overseas_count
+
         current_players = len(squad)
         total_spent = sum(price for _, price, _, _ in squad) if squad else 0
 
-        # Separate players by type
+        # Separate players by type and count overseas
         retained_players = [(p, pr) for p, pr, acq, _ in squad if acq == "retained"]
         traded_players = [(p, pr, s) for p, pr, acq, s in squad if acq == "traded"]
         bought_players = [(p, pr) for p, pr, acq, _ in squad if acq == "bought"]
 
+        # Count overseas players (only from retained - auction data doesn't have this info)
+        overseas_count = 0
+        for player, _ in retained_players:
+            if is_player_overseas(player):
+                overseas_count += 1
+        for player, _, _ in traded_players:
+            if is_player_overseas(player):
+                overseas_count += 1
+
+        # Get slot configuration
+        slots = TEAM_SLOTS.get(team_code, {"overseas": 8, "total": 25})
+        initial_overseas_slots = slots["overseas"]
+        initial_total_slots = slots["total"]
+
+        # Calculate retained counts to determine initial overseas in squad
+        retained_overseas = get_retained_overseas_count(team_code)
+        max_overseas = 8  # IPL max overseas per squad
+        current_overseas_in_squad = overseas_count  # This is what we counted above
+
         msg = f"**{team_code} Squad:**\n```\n"
+
+        def format_player_line(player: str, price: int, suffix: str = "") -> str:
+            """Format player line with overseas indicator"""
+            overseas_marker = "✈️" if is_player_overseas(player) else "  "
+            return f"{overseas_marker} {player:23} : {format_amount(price)}{suffix}\n"
 
         if retained_players:
             msg += "--- Retained ---\n"
             for player, price in retained_players:
-                msg += f"{player:25} : {format_amount(price)}\n"
+                msg += format_player_line(player, price)
 
         if bought_players:
             if retained_players:
                 msg += "\n"
             msg += "--- Bought ---\n"
             for player, price in bought_players:
-                msg += f"{player:25} : {format_amount(price)}\n"
+                msg += format_player_line(player, price)
 
         if traded_players:
             if retained_players or bought_players:
                 msg += "\n"
             msg += "--- Traded ---\n"
             for player, price, source in traded_players:
-                msg += f"{player:25} : {format_amount(price)} [from {source}]\n"
+                msg += format_player_line(player, price, f" [from {source}]")
 
         if not retained_players and not bought_players and not traded_players:
             msg += "No players yet.\n"
@@ -1000,8 +1027,14 @@ class MessageFormatter:
         msg += f"\n{'='*50}\n"
         msg += f"{'Total Spent':30} : {format_amount(total_spent)}\n"
         msg += f"{'Remaining Purse':30} : {format_amount(purse)}\n"
-        msg += f"{'Total Players':30} : {current_players}\n"
+        msg += f"{'Total Players':30} : {current_players}/{MAX_SQUAD_SIZE}\n"
+        msg += (
+            f"{'Overseas Players':30} : {current_overseas_in_squad}/{max_overseas} ✈️\n"
+        )
+        msg += f"{'Slots Available (Total)':30} : {initial_total_slots}\n"
+        msg += f"{'Slots Available (Overseas)':30} : {initial_overseas_slots}\n"
         msg += "```"
+        msg += "\n⚠️ *Manually check overseas slots after auction buys*"
         return msg
 
 

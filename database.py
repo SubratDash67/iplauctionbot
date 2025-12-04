@@ -1624,6 +1624,94 @@ class Database:
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_team_bid_summary_by_player(
+        self, team_code: str, limit: int = 20
+    ) -> List[dict]:
+        """Get bid summary for each player a team bid on.
+
+        Returns list of dicts with:
+        - player_name: Player name
+        - entry_bid: First bid amount by this team
+        - exit_bid: Last bid amount by this team
+        - won: True if this team won the player
+        - final_price: Final sale price (if sold)
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # Get distinct players this team bid on (most recent first)
+            cursor.execute(
+                """
+                SELECT DISTINCT player_name, MIN(timestamp) as first_ts
+                FROM bid_history 
+                WHERE team_code = ?
+                GROUP BY player_name
+                ORDER BY first_ts DESC
+                LIMIT ?
+                """,
+                (team_code, limit),
+            )
+            players = [row["player_name"] for row in cursor.fetchall()]
+
+            results = []
+            for player_name in players:
+                # Get entry (first) bid
+                cursor.execute(
+                    """
+                    SELECT amount FROM bid_history 
+                    WHERE team_code = ? AND player_name = ?
+                    ORDER BY timestamp ASC LIMIT 1
+                    """,
+                    (team_code, player_name),
+                )
+                entry_row = cursor.fetchone()
+                entry_bid = entry_row["amount"] if entry_row else 0
+
+                # Get exit (last) bid
+                cursor.execute(
+                    """
+                    SELECT amount FROM bid_history 
+                    WHERE team_code = ? AND player_name = ?
+                    ORDER BY timestamp DESC LIMIT 1
+                    """,
+                    (team_code, player_name),
+                )
+                exit_row = cursor.fetchone()
+                exit_bid = exit_row["amount"] if exit_row else 0
+
+                # Check if team won this player
+                cursor.execute(
+                    """
+                    SELECT team_code, final_price FROM sales 
+                    WHERE LOWER(player_name) = LOWER(?)
+                    AND team_code != 'UNSOLD' 
+                    AND team_code != 'RELEASED'
+                    AND player_name NOT LIKE '%(TRADE%'
+                    AND player_name NOT LIKE '%(RELEASED%'
+                    ORDER BY sold_at DESC LIMIT 1
+                    """,
+                    (player_name,),
+                )
+                sale_row = cursor.fetchone()
+
+                won = False
+                final_price = 0
+                if sale_row:
+                    won = sale_row["team_code"] == team_code
+                    final_price = sale_row["final_price"]
+
+                results.append(
+                    {
+                        "player_name": player_name,
+                        "entry_bid": entry_bid,
+                        "exit_bid": exit_bid,
+                        "won": won,
+                        "final_price": final_price if won else exit_bid,
+                    }
+                )
+
+            return results
+
     def reauction_multiple_players(self, player_ids: List[int]) -> int:
         with self._transaction() as conn:
             cursor = conn.cursor()

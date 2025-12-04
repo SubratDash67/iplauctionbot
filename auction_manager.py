@@ -79,8 +79,13 @@ class AuctionManager:
         This serves as the /loadretained command handler.
         """
         try:
+            # 0. First, remove any duplicate players in squads
+            removed = self.db.remove_duplicate_players()
+            if removed > 0:
+                logger.info(f"Removed {removed} duplicate players from squads")
+
             # 1. Populate DB with retained players
-            self._initialize_retained_players()
+            count = self._initialize_retained_players()
 
             # 2. Get fresh data from DB
             teams = self.db.get_teams()
@@ -91,7 +96,10 @@ class AuctionManager:
                 self.excel_file, teams, squads
             )
 
-            return True, "Successfully loaded retained players and initialized Excel."
+            msg = f"Successfully loaded {count} new retained players and initialized Excel."
+            if removed > 0:
+                msg += f" (Removed {removed} duplicate entries)"
+            return True, msg
         except Exception as e:
             logger.error(f"Error loading retained data: {e}")
             return False, f"Error loading retained data: {str(e)}"
@@ -99,6 +107,7 @@ class AuctionManager:
     def _initialize_retained_players(self):
         """Initialize retained players into squads.
         Checks globally across ALL teams to prevent duplicates.
+        Handles both 2-tuple (name, salary) and 3-tuple (name, salary, is_overseas) formats.
         """
         existing_squads = self.db.get_all_squads()
 
@@ -110,7 +119,14 @@ class AuctionManager:
 
         count = 0
         for team_code, players in RETAINED_PLAYERS.items():
-            for player_name, salary in players:
+            for player_data in players:
+                # Handle both 2-tuple and 3-tuple formats
+                if len(player_data) >= 2:
+                    player_name = player_data[0]
+                    salary = player_data[1]
+                else:
+                    continue
+
                 if player_name.lower() not in all_existing_players:
                     try:
                         success = self.db.add_to_squad(
@@ -871,15 +887,66 @@ class AuctionManager:
             )
 
     # ==================== TRADING & MANUAL ====================
+    def _validate_squad_limits(
+        self, team: str, is_overseas: bool = False, is_adding: bool = True
+    ) -> Tuple[bool, str]:
+        """Validate squad size and overseas limits for a team.
+
+        Args:
+            team: Team code
+            is_overseas: Whether the player being added/removed is overseas
+            is_adding: True if adding player, False if removing
+
+        Returns:
+            (is_valid, error_message)
+        """
+        from config import MAX_SQUAD_SIZE, TEAM_SLOTS
+        from retained_players import is_player_overseas, get_retained_overseas_count
+
+        squads = self.db.get_all_squads()
+        current_squad = squads.get(team, [])
+        current_count = len(current_squad)
+
+        # Count current overseas players
+        overseas_count = 0
+        for player_name, _ in current_squad:
+            if is_player_overseas(player_name):
+                overseas_count += 1
+
+        max_overseas = 8  # IPL rule: max 8 overseas per squad
+
+        if is_adding:
+            # Check total squad limit
+            if current_count >= MAX_SQUAD_SIZE:
+                return (
+                    False,
+                    f"**{team}** already has {current_count}/{MAX_SQUAD_SIZE} players (squad full)",
+                )
+
+            # Check overseas limit
+            if is_overseas and overseas_count >= max_overseas:
+                return (
+                    False,
+                    f"**{team}** already has {overseas_count}/{max_overseas} overseas players (overseas limit reached)",
+                )
+
+        return True, ""
+
     def trade_player(
         self, player_name: str, from_team: str, to_team: str, price_cr: float
     ) -> Tuple[bool, str]:
         """Trade player between teams (cash trade)"""
+        from retained_players import is_player_overseas
+
         # Convert Crores to Rupees (1 Cr = 10,000,000)
         price = int(price_cr * 10_000_000)
+        to_team_upper = to_team.upper()
+        from_team_upper = from_team.upper()
+
+        # Check if player is overseas (for limit validation)
+        player_is_overseas = is_player_overseas(player_name)
 
         # Validate target team has enough purse
-        to_team_upper = to_team.upper()
         teams = self.db.get_teams()
         if to_team_upper in teams and teams[to_team_upper] < price:
             return (
@@ -887,8 +954,15 @@ class AuctionManager:
                 f"**{to_team_upper}** has insufficient purse. Need {format_amount(price)}, have {format_amount(teams[to_team_upper])}",
             )
 
+        # Validate squad limits for receiving team
+        valid, error_msg = self._validate_squad_limits(
+            to_team_upper, player_is_overseas, is_adding=True
+        )
+        if not valid:
+            return False, error_msg
+
         success = self.db.trade_player(
-            player_name, from_team.upper(), to_team_upper, price
+            player_name, from_team_upper, to_team_upper, price
         )
         if success:
             # Update Excel after trade
@@ -913,6 +987,8 @@ class AuctionManager:
         Per IPL rules: players exchange teams, salaries count against NEW team's cap.
         Compensation (if any) is NOT part of salary cap.
         """
+        from retained_players import is_player_overseas
+
         team_a_upper = team_a.upper()
         team_b_upper = team_b.upper()
 
@@ -922,6 +998,29 @@ class AuctionManager:
             return False, f"Invalid team: {team_a}"
         if team_b_upper not in teams:
             return False, f"Invalid team: {team_b}"
+
+        # Check overseas implications of swap
+        a_is_overseas = is_player_overseas(player_a)
+        b_is_overseas = is_player_overseas(player_b)
+
+        # If swapping an Indian for an overseas, check overseas limit
+        # Team A loses player_a, gains player_b
+        # Team B loses player_b, gains player_a
+        if b_is_overseas and not a_is_overseas:
+            # Team A is gaining an overseas player
+            valid, error = self._validate_squad_limits(
+                team_a_upper, is_overseas=True, is_adding=True
+            )
+            if not valid:
+                return False, f"Swap blocked: {error}"
+
+        if a_is_overseas and not b_is_overseas:
+            # Team B is gaining an overseas player
+            valid, error = self._validate_squad_limits(
+                team_b_upper, is_overseas=True, is_adding=True
+            )
+            if not valid:
+                return False, f"Swap blocked: {error}"
 
         # Convert compensation to rupees
         compensation_amount = (
@@ -979,16 +1078,24 @@ class AuctionManager:
             logger.error(f"Error updating Excel after trade: {e}")
 
     def get_trade_log_message(self) -> str:
-        """Generate a formatted trade log message for display"""
+        """Generate a formatted trade log message for display.
+
+        Returns a compact, clean trade log that fits within Discord's 2000 char limit.
+        Format:
+        📋 Trade Log
+        ┌──────────────────────────────────────────────────┐
+        │ 💵 Player Name    FROM → TO     Price            │
+        │ 🔄 Player A ↔ Player B   (comp: X)              │
+        └──────────────────────────────────────────────────┘
+        """
         trades = self.db.get_all_trades()
 
         if not trades:
             return "📋 **Trade Log**\n\n_No trades have been made yet._"
 
-        msg = "📋 **Trade Log**\n\n"
-
         # Group swap trades to avoid duplicates (swaps create 2 records)
         seen_swaps = set()
+        trade_lines = []
 
         for trade in trades:
             trade_type = trade.get("trade_type", "cash")
@@ -1008,36 +1115,55 @@ class AuctionManager:
                     continue
                 seen_swaps.add(swap_key)
 
-                msg += f"🔄 **Swap Trade**\n"
-                msg += f"   • {trade['player_name']} ({format_amount(trade['trade_price'])}) "
-                msg += f"**{trade['from_team']}** → **{trade['to_team']}**\n"
+                # Compact swap format
+                p1 = trade["player_name"][:18]
+                p2 = (trade.get("swap_player") or "")[:18]
+                t1 = trade["from_team"]
+                t2 = trade["to_team"]
+                comp = trade.get("compensation_amount", 0)
 
-                if trade.get("swap_player"):
-                    msg += f"   • {trade['swap_player']} ({format_amount(trade.get('swap_player_price', 0))}) "
-                    msg += f"**{trade['to_team']}** → **{trade['from_team']}**\n"
-
-                if (
-                    trade.get("compensation_amount")
-                    and trade["compensation_amount"] > 0
-                ):
+                line = f"🔄 {p1} ({t1}) ↔ {p2} ({t2})"
+                if comp and comp > 0:
                     direction = trade.get("compensation_direction", "")
-                    msg += f"   💰 Compensation: {format_amount(trade['compensation_amount'])}"
-                    if direction:
-                        msg += f" (paid by {direction.replace('_pays', '')})"
-                    msg += "\n"
+                    payer = direction.replace("_pays", "") if direction else "?"
+                    line += f" | {payer} pays {format_amount(comp)}"
+                trade_lines.append(line)
             else:
-                # Cash trade
-                msg += f"💵 **Cash Trade**\n"
-                msg += f"   • {trade['player_name']}: "
-                msg += f"**{trade['from_team']}** → **{trade['to_team']}** "
-                msg += f"for {format_amount(trade['trade_price'])}\n"
+                # Compact cash trade format
+                player = trade["player_name"][:20]
+                from_t = trade["from_team"]
+                to_t = trade["to_team"]
+                price = format_amount(trade["trade_price"])
 
-                original = trade.get("original_price", 0)
-                if original and original != trade["trade_price"]:
-                    msg += f"   📊 Original price: {format_amount(original)}\n"
+                line = f"💵 {player}: {from_t} → {to_t} @ {price}"
+                trade_lines.append(line)
 
-            msg += "\n"
+        # Build message with Discord limit in mind (2000 chars)
+        header = "📋 **Trade Log**\n```\n"
+        footer = "\n```"
+        separator = "\n"
 
+        # Calculate available space for trades
+        max_chars = 1900 - len(header) - len(footer)
+
+        result_lines = []
+        current_chars = 0
+        truncated = 0
+
+        for line in trade_lines:
+            line_len = len(line) + len(separator)
+            if current_chars + line_len <= max_chars:
+                result_lines.append(line)
+                current_chars += line_len
+            else:
+                truncated += 1
+
+        msg = header + separator.join(result_lines)
+
+        if truncated > 0:
+            msg += f"\n... and {truncated} more trade(s)"
+
+        msg += footer
         return msg.strip()
 
     def set_trade_channel(self, channel_id: str, message_id: str = None):
@@ -1063,6 +1189,13 @@ class AuctionManager:
 
         # Convert Crores to Rupees (1 Cr = 10,000,000)
         price = int(price_cr * 10_000_000)
+
+        # Check squad limits (can't determine if overseas without auction data)
+        valid, error_msg = self._validate_squad_limits(
+            team_upper, is_overseas=False, is_adding=True
+        )
+        if not valid:
+            return False, error_msg
 
         # Check if purse would go negative
         if teams[team_upper] < price:
@@ -1600,23 +1733,37 @@ class AuctionManager:
         return msg
 
     def get_team_bid_history_display(self, team: str, limit: int = 20) -> str:
-        """Get bid history for a specific team with player names"""
-        team_upper = team.upper()
-        bids = self.db.get_team_bid_history(team_upper, limit)
+        """Get bid summary for a specific team showing entry/exit/result per player.
 
-        if not bids:
+        Format:
+        TEAM Bidding Summary (Last X players):
+        Player                    Entry   Exit/Won Result
+        ====================================================
+        Devon Conway                1cr        1cr ✅ WON
+        Jake Fraser-Mcgurk          2cr        6cr ❌ EXIT
+        """
+        team_upper = team.upper()
+        summaries = self.db.get_team_bid_summary_by_player(team_upper, limit)
+
+        if not summaries:
             return f"No bid history found for **{team_upper}**."
 
-        msg = (
-            f"**{team_upper} Bid History (Last {min(limit, len(bids))} bids):**\n```\n"
-        )
-        msg += f"{'Player':<25} {'Amount':<12} {'Type':<8}\n"
-        msg += "=" * 50 + "\n"
+        msg = f"**{team_upper} Bidding Summary (Last {min(limit, len(summaries))} players):**\n```\n"
+        msg += f"{'Player':<24} {'Entry':>8} {'Exit/Won':>10} {'Result':<8}\n"
+        msg += "=" * 54 + "\n"
 
-        for bid in bids:
-            auto = "AUTO" if bid.get("is_auto_bid") else "Manual"
-            player = bid.get("player_name", "Unknown")[:24]
-            msg += f"{player:<25} {format_amount(bid['amount']):<12} {auto:<8}\n"
+        for s in summaries:
+            player = s["player_name"][:23]
+            entry = format_amount(s["entry_bid"])
+
+            if s["won"]:
+                exit_val = format_amount(s["final_price"])
+                result = "✅ WON"
+            else:
+                exit_val = format_amount(s["exit_bid"])
+                result = "❌ EXIT"
+
+            msg += f"{player:<24} {entry:>8} {exit_val:>10} {result:<8}\n"
 
         msg += "```"
         return msg
