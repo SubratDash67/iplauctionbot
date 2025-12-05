@@ -7,6 +7,7 @@ Single persistent paginated trade-log message (Prev/Next)
 """
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 import discord
@@ -19,7 +20,18 @@ import logging
 from typing import Optional, Dict, List
 
 # Now it's safe to import admin_checks and other modules that read env/config
-from admin_checks import admin_or_owner_check
+from admin_checks import (
+    admin_or_owner_check,
+    channel_permission_check,
+    CHANNEL_AUCTION_ROOM,
+    CHANNEL_AUCTION_CHAT,
+    CHANNEL_AUCTION_TEAM,
+    CHANNEL_AUCTION_NOTIFY,
+    AUCTION_ROOM_COMMANDS,
+    AUCTION_CHAT_COMMANDS,
+    AUCTION_TEAM_COMMANDS,
+    AUCTION_NOTIFY_COMMANDS,
+)
 
 
 # Configure logging
@@ -156,6 +168,280 @@ for cmdname in ("settradechannel", "tradelog"):
 
 
 # ============================================================
+# CHANNEL CONFIGURATION COMMANDS
+# ============================================================
+
+
+@bot.tree.command(
+    name="setauctionroom",
+    description="Set the auction room channel for bidding commands (Admin only)",
+)
+@app_commands.describe(channel="The channel where bidding commands will be allowed")
+@admin_or_owner_check()
+async def set_auction_room(
+    interaction: discord.Interaction, channel: discord.TextChannel
+):
+    """Configure the auction room channel for live bidding."""
+    guild_id = str(interaction.guild.id)
+    channel_id = str(channel.id)
+
+    bot.auction_manager.db.set_channel_config(
+        guild_id, CHANNEL_AUCTION_ROOM, channel_id
+    )
+
+    # Build list of commands allowed in this channel
+    user_cmds = [
+        c for c in ["bid", "bidhistory", "teambids"] if c in AUCTION_ROOM_COMMANDS
+    ]
+
+    embed = discord.Embed(
+        title="✅ Auction Room Configured",
+        description=f"**{channel.mention}** is now the auction room channel.",
+        color=discord.Color.green(),
+    )
+    embed.add_field(
+        name="📋 User Commands Allowed",
+        value=f"`/{', /'.join(user_cmds)}`" if user_cmds else "None",
+        inline=False,
+    )
+    embed.add_field(
+        name="🔧 Admin Commands",
+        value="All auction control commands (start, stop, pause, resume, skip, etc.)",
+        inline=False,
+    )
+    embed.set_footer(text="Admin commands can be used in any channel")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="setauctionchat",
+    description="Set the auction chat channel for discussion commands (Admin only)",
+)
+@app_commands.describe(
+    channel="The channel for team viewing and discussion (no bidding)"
+)
+@admin_or_owner_check()
+async def set_auction_chat(
+    interaction: discord.Interaction, channel: discord.TextChannel
+):
+    """Configure the auction chat channel for discussion and team viewing."""
+    guild_id = str(interaction.guild.id)
+    channel_id = str(channel.id)
+
+    bot.auction_manager.db.set_channel_config(
+        guild_id, CHANNEL_AUCTION_CHAT, channel_id
+    )
+
+    # Build list of commands allowed in this channel
+    user_cmds = [
+        c
+        for c in [
+            "myteam",
+            "squad",
+            "showteams",
+            "showlists",
+            "showpurse",
+            "status",
+            "allsquads",
+            "findplayer",
+            "userhelp",
+        ]
+        if c in AUCTION_CHAT_COMMANDS
+    ]
+
+    embed = discord.Embed(
+        title="✅ Auction Chat Configured",
+        description=f"**{channel.mention}** is now the auction chat channel.",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(
+        name="📋 User Commands Allowed",
+        value=f"`/{', /'.join(user_cmds)}`" if user_cmds else "None",
+        inline=False,
+    )
+    embed.add_field(
+        name="🔧 Admin Commands",
+        value="Team assignment, purse management, trade/swap commands",
+        inline=False,
+    )
+    embed.add_field(
+        name="⚠️ Note",
+        value="Bidding (`/bid`) is **NOT** allowed in this channel",
+        inline=False,
+    )
+    embed.set_footer(text="Admin commands can be used in any channel")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="setauctionteam",
+    description="Set the auction team channel for team squad viewing (Admin only)",
+)
+@app_commands.describe(channel="The channel where users view their team's final squad")
+@admin_or_owner_check()
+async def set_auction_team(
+    interaction: discord.Interaction, channel: discord.TextChannel
+):
+    """Configure the auction team channel for final team submissions."""
+    guild_id = str(interaction.guild.id)
+    channel_id = str(channel.id)
+
+    bot.auction_manager.db.set_channel_config(
+        guild_id, CHANNEL_AUCTION_TEAM, channel_id
+    )
+
+    embed = discord.Embed(
+        title="✅ Auction Team Channel Configured",
+        description=f"**{channel.mention}** is now the auction team channel.",
+        color=discord.Color.purple(),
+    )
+    embed.add_field(
+        name="📋 User Commands Allowed",
+        value="`/teamsquad` - View your own team's squad",
+        inline=False,
+    )
+    embed.add_field(
+        name="Purpose",
+        value="Users can view their assigned team's final squad here",
+        inline=False,
+    )
+    embed.set_footer(text="Admin commands can be used in any channel")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="setnotifyauction",
+    description="Set the notification channel for announcements and logs (Admin only)",
+)
+@app_commands.describe(channel="The channel for announcements, trade logs, and stats")
+@admin_or_owner_check()
+async def set_notify_auction(
+    interaction: discord.Interaction, channel: discord.TextChannel
+):
+    """Configure the notification channel for announcements and logging."""
+    guild_id = str(interaction.guild.id)
+    channel_id = str(channel.id)
+
+    bot.auction_manager.db.set_channel_config(
+        guild_id, CHANNEL_AUCTION_NOTIFY, channel_id
+    )
+
+    embed = discord.Embed(
+        title="✅ Notification Channel Configured",
+        description=f"**{channel.mention}** is now the notification channel.",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="📋 Commands Available",
+        value="`/tradelog`, `/showunsold`, `/showskipped`",
+        inline=False,
+    )
+    embed.add_field(
+        name="🔧 Admin Commands",
+        value="`/announce`, `/settradechannel`, `/setstatschannel`, `/adminhelp`",
+        inline=False,
+    )
+    embed.add_field(
+        name="Purpose",
+        value="Admin-only channel for announcements, live stats, and logging",
+        inline=False,
+    )
+    embed.set_footer(text="Admin commands can be used in any channel")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="showchannelconfig",
+    description="Show current channel configurations (Admin only)",
+)
+@admin_or_owner_check()
+async def show_channel_config(interaction: discord.Interaction):
+    """Display all configured auction channels."""
+    guild_id = str(interaction.guild.id)
+    configs = bot.auction_manager.db.get_all_channel_configs(guild_id)
+
+    if not configs:
+        await interaction.response.send_message(
+            "**No channels configured yet.**\n\n"
+            "Use these commands to configure auction channels:\n"
+            "• `/setauctionroom` - Bidding channel\n"
+            "• `/setauctionchat` - Discussion channel\n"
+            "• `/setauctionteam` - Team squad channel\n"
+            "• `/setnotifyauction` - Announcements channel\n\n"
+            "*Until channels are configured, commands work everywhere.*",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title="📋 Auction Channel Configuration",
+        color=discord.Color.blue(),
+    )
+
+    channel_type_names = {
+        CHANNEL_AUCTION_ROOM: "🎯 Auction Room (Bidding)",
+        CHANNEL_AUCTION_CHAT: "💬 Auction Chat (Discussion)",
+        CHANNEL_AUCTION_TEAM: "👥 Auction Team (Squad View)",
+        CHANNEL_AUCTION_NOTIFY: "📢 Notifications (Announcements)",
+    }
+
+    for ch_type, ch_name in channel_type_names.items():
+        ch_id = configs.get(ch_type)
+        if ch_id:
+            channel = interaction.guild.get_channel(int(ch_id))
+            value = channel.mention if channel else f"<#{ch_id}> (not found)"
+        else:
+            value = "*Not configured*"
+        embed.add_field(name=ch_name, value=value, inline=False)
+
+    embed.set_footer(text="Use /clearchannelconfig to remove a configuration")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(
+    name="clearchannelconfig",
+    description="Clear a channel configuration (Admin only)",
+)
+@app_commands.describe(channel_type="Which channel config to clear")
+@app_commands.choices(
+    channel_type=[
+        app_commands.Choice(name="Auction Room (Bidding)", value="auction_room"),
+        app_commands.Choice(name="Auction Chat (Discussion)", value="auction_chat"),
+        app_commands.Choice(name="Auction Team (Squad View)", value="auction_team"),
+        app_commands.Choice(name="Notifications", value="auction_notify"),
+        app_commands.Choice(name="All Channels", value="all"),
+    ]
+)
+@admin_or_owner_check()
+async def clear_channel_config(interaction: discord.Interaction, channel_type: str):
+    """Clear a specific channel configuration or all configurations."""
+    guild_id = str(interaction.guild.id)
+
+    if channel_type == "all":
+        count = bot.auction_manager.db.clear_all_channel_configs(guild_id)
+        await interaction.response.send_message(
+            f"✅ Cleared **{count}** channel configuration(s).\n"
+            "*Commands will now work in any channel until reconfigured.*"
+        )
+    else:
+        success = bot.auction_manager.db.clear_channel_config(guild_id, channel_type)
+        if success:
+            await interaction.response.send_message(
+                f"✅ Cleared **{channel_type}** channel configuration."
+            )
+        else:
+            await interaction.response.send_message(
+                f"No configuration found for **{channel_type}**.",
+                ephemeral=True,
+            )
+
+
+# ============================================================
 # TEAM ASSIGNMENT COMMANDS
 # ============================================================
 
@@ -165,6 +451,7 @@ for cmdname in ("settradechannel", "tradelog"):
     user="The user to assign", team="Team abbreviation (MI, CSK, RCB, etc.)"
 )
 @admin_or_owner_check()
+@channel_permission_check("assignteam")
 async def assign_team(interaction: discord.Interaction, user: discord.User, team: str):
     team_upper = team.upper()
     if team_upper not in TEAMS:
@@ -189,6 +476,7 @@ async def assign_team(interaction: discord.Interaction, user: discord.User, team
     assignments="Format: @user1:TEAM1, @user2:TEAM2 (e.g., @John:MI, @Jane:CSK)"
 )
 @admin_or_owner_check()
+@channel_permission_check("assignteams")
 async def assign_teams_bulk(interaction: discord.Interaction, assignments: str):
     """Assign multiple users to teams at once"""
     await interaction.response.defer()
@@ -246,6 +534,7 @@ async def assign_teams_bulk(interaction: discord.Interaction, assignments: str):
 )
 @app_commands.describe(user="The user to unassign")
 @admin_or_owner_check()
+@channel_permission_check("unassignteam")
 async def unassign_team(interaction: discord.Interaction, user: discord.User):
     if user.id in bot.user_teams:
         team = bot.user_teams.pop(user.id)
@@ -260,6 +549,7 @@ async def unassign_team(interaction: discord.Interaction, user: discord.User):
 
 
 @bot.tree.command(name="showteams", description="Show all user-team assignments")
+@channel_permission_check("showteams")
 async def show_teams(interaction: discord.Interaction):
     if not bot.user_teams:
         await interaction.response.send_message("No users assigned to teams yet.")
@@ -275,6 +565,7 @@ async def show_teams(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="myteam", description="Check which team you are assigned to")
+@channel_permission_check("myteam")
 async def my_team(interaction: discord.Interaction):
     team = bot.user_teams.get(interaction.user.id)
     if team:
@@ -297,6 +588,7 @@ async def my_team(interaction: discord.Interaction):
     name="bid", description="Place a bid for your team (auto-calculates amount)"
 )
 @app_commands.checks.cooldown(1, 2.0, key=lambda i: i.user.id)
+@channel_permission_check("bid")
 async def bid(interaction: discord.Interaction):
     user_id = interaction.user.id
 
@@ -371,6 +663,7 @@ async def bid(interaction: discord.Interaction):
 
 @bot.tree.command(name="undobid", description="Undo the last bid (Admin only)")
 @admin_or_owner_check()
+@channel_permission_check("undobid")
 async def undo_bid(interaction: discord.Interaction):
     success, msg = await bot.auction_manager.undo_last_bid()
     await interaction.response.send_message(msg)
@@ -380,6 +673,7 @@ async def undo_bid(interaction: discord.Interaction):
 
 @bot.tree.command(name="bidhistory", description="Show recent bid history")
 @app_commands.describe(limit="Number of recent bids to show (default: 10)")
+@channel_permission_check("bidhistory")
 async def bid_history(interaction: discord.Interaction, limit: int = 10):
     history = bot.auction_manager.get_bid_history_display(limit=min(limit, 50))
     await interaction.response.send_message(history)
@@ -390,6 +684,7 @@ async def bid_history(interaction: discord.Interaction, limit: int = 10):
     team="Team code (MI, CSK, etc.)",
     limit="Number of recent bids to show (default: 20)",
 )
+@channel_permission_check("teambids")
 async def team_bid_history(
     interaction: discord.Interaction, team: str, limit: int = 20
 ):
@@ -409,6 +704,7 @@ async def team_bid_history(
 
 
 @bot.tree.command(name="teamsquad", description="Show players in your team")
+@channel_permission_check("teamsquad")
 async def team_squad(interaction: discord.Interaction):
     """Shows the squad for the user's assigned team"""
     from config import TEAM_SLOTS
@@ -441,6 +737,7 @@ async def team_squad(interaction: discord.Interaction):
 
 @bot.tree.command(name="squad", description="View any team's squad and purse")
 @app_commands.describe(team="Team Code (e.g. MI, CSK)")
+@channel_permission_check("squad")
 async def view_squad(interaction: discord.Interaction, team: str):
     """View any team's squad - available to all users"""
     from config import TEAMS, TEAM_SLOTS
@@ -469,6 +766,7 @@ async def view_squad(interaction: discord.Interaction, team: str):
 
 @bot.tree.command(name="rollback", description="Undo the last sale (Admin only)")
 @admin_or_owner_check()
+@channel_permission_check("rollback")
 async def rollback_sale(interaction: discord.Interaction):
     result = bot.auction_manager.rollback_last_sale()
 
@@ -502,6 +800,7 @@ async def rollback_sale(interaction: discord.Interaction):
     team="Team code (MI, CSK, etc.)", player="Player name to release"
 )
 @admin_or_owner_check()
+@channel_permission_check("release")
 async def release_player(interaction: discord.Interaction, team: str, player: str):
     success, message = bot.auction_manager.release_retained_player(team, player)
     if success:
@@ -517,6 +816,7 @@ async def release_player(interaction: discord.Interaction, team: str, player: st
     releases="Format: Team1:Player1, Team2:Player2 (e.g., MI:Rohit, CSK:Dhoni)"
 )
 @admin_or_owner_check()
+@channel_permission_check("releasemultiple")
 async def release_multiple(interaction: discord.Interaction, releases: str):
     """Release multiple players from teams at once"""
     await interaction.response.defer(ephemeral=True)
@@ -564,6 +864,7 @@ async def release_multiple(interaction: discord.Interaction, releases: str):
     price="Price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)",
 )
 @admin_or_owner_check()
+@channel_permission_check("addtosquad")
 async def add_to_squad(
     interaction: discord.Interaction, team: str, player: str, price: float
 ):
@@ -585,6 +886,7 @@ async def add_to_squad(
     base_price="Base price in Crores (e.g., 2 = 2Cr, 0.5 = 50L). Default: 0.2Cr (20L)",
 )
 @admin_or_owner_check()
+@channel_permission_check("addplayer")
 async def add_player(
     interaction: discord.Interaction,
     list_name: str,
@@ -613,6 +915,7 @@ async def add_player(
     players="Players in format: Name1:Price1, Name2:Price2 (Price in Cr, e.g., Virat:2, Rohit:1.5)",
 )
 @admin_or_owner_check()
+@channel_permission_check("addplayers")
 async def add_players_bulk(
     interaction: discord.Interaction, list_name: str, players: str
 ):
@@ -668,6 +971,7 @@ async def add_players_bulk(
     players="Player names separated by commas (e.g., Player1, Player2, Player3)",
 )
 @admin_or_owner_check()
+@channel_permission_check("removeplayers")
 async def remove_players_bulk(
     interaction: discord.Interaction, list_name: str, players: str
 ):
@@ -707,6 +1011,7 @@ async def remove_players_bulk(
 )
 @app_commands.describe(list_name="Name of the list", filepath="Full path to CSV file")
 @admin_or_owner_check()
+@channel_permission_check("loadcsv")
 async def load_csv(interaction: discord.Interaction, list_name: str, filepath: str):
     await interaction.response.defer()
     filepath = filepath.strip().strip('"').strip("'")
@@ -720,6 +1025,7 @@ async def load_csv(interaction: discord.Interaction, list_name: str, filepath: s
 )
 @app_commands.describe(num_sets="Number of NEW sets to load (1-67)")
 @admin_or_owner_check()
+@channel_permission_check("loadsets")
 async def load_sets(interaction: discord.Interaction, num_sets: int):
     await interaction.response.defer()
 
@@ -738,6 +1044,7 @@ async def load_sets(interaction: discord.Interaction, num_sets: int):
     description="Load retained players into DB and Excel (Admin only)",
 )
 @admin_or_owner_check()
+@channel_permission_check("loadretained")
 async def load_retained(interaction: discord.Interaction):
     """Loads retained data and initializes Excel."""
     await interaction.response.defer()
@@ -882,6 +1189,7 @@ def paginate_lists_by_set(
 
 
 @bot.tree.command(name="showlists", description="Display all lists and their contents")
+@channel_permission_check("showlists")
 async def show_lists(interaction: discord.Interaction):
     player_lists = bot.auction_manager.player_lists
     list_order = bot.auction_manager.list_order
@@ -907,6 +1215,7 @@ async def show_lists(interaction: discord.Interaction):
 
 @bot.tree.command(name="start", description="Start the auction (Admin only)")
 @admin_or_owner_check()
+@channel_permission_check("start")
 async def start_auction(interaction: discord.Interaction):
     success, message = bot.auction_manager.start_auction()
     if not success:
@@ -920,6 +1229,7 @@ async def start_auction(interaction: discord.Interaction):
 
 @bot.tree.command(name="stop", description="Stop the auction (Admin only)")
 @admin_or_owner_check()
+@channel_permission_check("stop")
 async def stop_auction(interaction: discord.Interaction):
     if bot.auction_manager.stop_auction():
         await bot.cancel_countdown_task()
@@ -932,6 +1242,7 @@ async def stop_auction(interaction: discord.Interaction):
 
 @bot.tree.command(name="pause", description="Pause the auction (Bulk Pause)")
 @admin_or_owner_check()
+@channel_permission_check("pause")
 async def pause_auction(interaction: discord.Interaction):
     if bot.auction_manager.pause_auction():
         await interaction.response.send_message("**Auction Paused**")
@@ -941,6 +1252,7 @@ async def pause_auction(interaction: discord.Interaction):
 
 @bot.tree.command(name="resume", description="Resume the auction (Admin only)")
 @admin_or_owner_check()
+@channel_permission_check("resume")
 async def resume_auction(interaction: discord.Interaction):
     if not bot.auction_manager.active:
         await interaction.response.send_message(
@@ -1021,6 +1333,7 @@ async def resume_auction(interaction: discord.Interaction):
     name="skip", description="Skip current player - mark as unsold (Admin only)"
 )
 @admin_or_owner_check()
+@channel_permission_check("skip")
 async def skip_player(interaction: discord.Interaction):
     if not bot.auction_manager.active or not bot.auction_manager.current_player:
         await interaction.response.send_message(
@@ -1048,6 +1361,7 @@ async def skip_player(interaction: discord.Interaction):
     name="skipset", description="Skip current set and move to next set (Admin only)"
 )
 @admin_or_owner_check()
+@channel_permission_check("skipset")
 async def skip_set(interaction: discord.Interaction):
     if not bot.auction_manager.active:
         await interaction.response.send_message("No active auction.", ephemeral=True)
@@ -1077,6 +1391,7 @@ async def skip_set(interaction: discord.Interaction):
     name="showskipped", description="Show all skipped players (Admin only)"
 )
 @admin_or_owner_check()
+@channel_permission_check("showskipped")
 async def show_skipped(interaction: discord.Interaction):
     """Show all players that were skipped"""
     skipped = bot.auction_manager.get_skipped_players()
@@ -1114,6 +1429,7 @@ async def show_skipped(interaction: discord.Interaction):
     mention_everyone="Whether to @everyone (default: False)",
 )
 @admin_or_owner_check()
+@channel_permission_check("announce")
 async def announce(
     interaction: discord.Interaction,
     message: str,
@@ -1142,6 +1458,7 @@ async def announce(
     description="Set channel for live stats updates (Admin only)",
 )
 @admin_or_owner_check()
+@channel_permission_check("setstatschannel")
 async def set_stats_channel(
     interaction: discord.Interaction, channel: discord.TextChannel
 ):
@@ -1158,6 +1475,7 @@ async def set_stats_channel(
 )
 @app_commands.describe(seconds="Gap duration in seconds")
 @admin_or_owner_check()
+@channel_permission_check("setcountdowngap")
 async def set_countdown_gap(interaction: discord.Interaction, seconds: int):
     """Sets the delay between the last bid and when the countdown/timer logic starts."""
     if seconds < 0:
@@ -1176,6 +1494,7 @@ async def set_countdown_gap(interaction: discord.Interaction, seconds: int):
 )
 @app_commands.describe(team="Team abbreviation", amount="Purse amount in rupees")
 @admin_or_owner_check()
+@channel_permission_check("setpurse")
 async def set_purse(interaction: discord.Interaction, team: str, amount: int):
     team_validated = validate_team_name(team, bot.auction_manager.teams)
     if not team_validated:
@@ -1196,6 +1515,7 @@ async def set_purse(interaction: discord.Interaction, team: str, amount: int):
     description="Reset all team purses to configured values (Admin only)",
 )
 @admin_or_owner_check()
+@channel_permission_check("resetpurses")
 async def reset_purses(interaction: discord.Interaction):
     from config import TEAMS
 
@@ -1279,6 +1599,7 @@ class ClearConfirmView(discord.ui.View):
     name="clear", description="Clear auction data/buys/released but keep retained data"
 )
 @admin_or_owner_check()
+@channel_permission_check("clear")
 async def clear_auction(interaction: discord.Interaction):
     """Clears trade, released, and auction data but keeps retained players."""
     # Show confirmation with backup option
@@ -1341,6 +1662,7 @@ async def clear_auction(interaction: discord.Interaction):
 )
 @app_commands.describe(seconds="Gap in seconds between players (1-60)")
 @admin_or_owner_check()
+@channel_permission_check("setplayergap")
 async def set_player_gap(interaction: discord.Interaction, seconds: int):
     if seconds < 1 or seconds > 60:
         await interaction.response.send_message(
@@ -1361,6 +1683,7 @@ async def set_player_gap(interaction: discord.Interaction, seconds: int):
     player="Player name to move", target_set="Target set name (e.g., BA1, M1)"
 )
 @admin_or_owner_check()
+@channel_permission_check("moveplayer")
 async def move_player(interaction: discord.Interaction, player: str, target_set: str):
     success = bot.auction_manager.db.move_player_to_set(player, target_set)
     if success:
@@ -1382,6 +1705,7 @@ async def move_player(interaction: discord.Interaction, player: str, target_set:
     target_set="Target set name (e.g., BA1, M1, accelerated)",
 )
 @admin_or_owner_check()
+@channel_permission_check("moveplayers")
 async def move_players(interaction: discord.Interaction, players: str, target_set: str):
     """Move multiple players to a target set at once"""
     await interaction.response.defer(ephemeral=True)
@@ -1418,6 +1742,7 @@ async def move_players(interaction: discord.Interaction, players: str, target_se
     seconds="Seconds before a player with no bids goes unsold (default: 60)",
 )
 @admin_or_owner_check()
+@channel_permission_check("unsoldtime")
 async def set_unsold_time(interaction: discord.Interaction, seconds: int):
     """Adjust the NO_START_TIMEOUT - time before a player goes unsold if no bids"""
     import config
@@ -1441,6 +1766,7 @@ async def set_unsold_time(interaction: discord.Interaction, seconds: int):
     description="Remove duplicate players from squads (Admin only)",
 )
 @admin_or_owner_check()
+@channel_permission_check("fixduplicates")
 async def fix_duplicates(interaction: discord.Interaction):
     removed = bot.auction_manager.db.remove_duplicate_players()
     if removed > 0:
@@ -1459,17 +1785,20 @@ async def fix_duplicates(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="showpurse", description="Display current team purses")
+@channel_permission_check("showpurse")
 async def show_purse(interaction: discord.Interaction):
     await interaction.response.send_message(bot.auction_manager.get_purse_display())
 
 
 @bot.tree.command(name="status", description="Show current auction status")
+@channel_permission_check("status")
 async def show_status(interaction: discord.Interaction):
     status = bot.auction_manager.get_status_display()
     await interaction.response.send_message(status)
 
 
 @bot.tree.command(name="allsquads", description="View summary of all teams' squads")
+@channel_permission_check("allsquads")
 async def all_squads(interaction: discord.Interaction):
     """View a summary of all teams - available to everyone"""
     squads = bot.auction_manager.team_squads
@@ -1501,6 +1830,7 @@ async def all_squads(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="userhelp", description="Show commands for players/users")
+@channel_permission_check("userhelp")
 async def user_help_command(interaction: discord.Interaction):
     help_text = """
 **Discord Auction Bot - User Commands**
@@ -1528,6 +1858,7 @@ async def user_help_command(interaction: discord.Interaction):
 
 @bot.tree.command(name="adminhelp", description="Show commands for Admins")
 @admin_or_owner_check()
+@channel_permission_check("adminhelp")
 async def admin_help_command(interaction: discord.Interaction):
     embed1 = discord.Embed(
         title="🔧 Admin Commands - Auction Control", color=discord.Color.blue()
@@ -1884,6 +2215,7 @@ async def countdown_loop(channel: discord.TextChannel):
     price="Trade price in Crores (e.g., 5 = 5Cr, 0.5 = 50L)",
 )
 @admin_or_owner_check()
+@channel_permission_check("trade")
 async def trade_command(
     interaction: discord.Interaction,
     player: str,
@@ -1975,6 +2307,7 @@ async def trade_command(
     compensation_from="Team paying compensation: team_a or team_b (optional)",
 )
 @admin_or_owner_check()
+@channel_permission_check("swap")
 async def swap_command(
     interaction: discord.Interaction,
     player_a: str,
@@ -2424,6 +2757,7 @@ class TradeLogView(discord.ui.View):
 )
 @app_commands.describe(channel="Channel for trade log display")
 @admin_or_owner_check()
+@channel_permission_check("settradechannel")
 async def settradechannel(
     interaction: discord.Interaction,
     channel: discord.TextChannel,
@@ -2533,6 +2867,7 @@ async def update_trade_log():
 
 
 @bot.tree.command(name="tradelog", description="Show all trades")
+@channel_permission_check("tradelog")
 async def tradelog(interaction: discord.Interaction):
     """Display the trade log"""
     msg = bot.auction_manager.get_trade_log_message()
@@ -2557,6 +2892,7 @@ async def tradelog(interaction: discord.Interaction):
 )
 @app_commands.describe(team="Team code (MI, CSK, etc.)")
 @admin_or_owner_check()
+@channel_permission_check("soldto")
 async def sold_to(interaction: discord.Interaction, team: str):
     if not bot.auction_manager.active:
         await interaction.response.send_message("No active auction", ephemeral=True)
@@ -2623,6 +2959,7 @@ async def sold_to(interaction: discord.Interaction, team: str):
     name="unsold", description="Mark current player as unsold (Admin only)"
 )
 @admin_or_owner_check()
+@channel_permission_check("unsold")
 async def mark_unsold(interaction: discord.Interaction):
     if not bot.auction_manager.active or not bot.auction_manager.current_player:
         await interaction.response.send_message(
@@ -2657,6 +2994,7 @@ async def mark_unsold(interaction: discord.Interaction):
     player_name="Name of the player to re-auction (uses original base price from CSV)"
 )
 @admin_or_owner_check()
+@channel_permission_check("reauction")
 async def reauction_player(interaction: discord.Interaction, player_name: str):
     success, message = bot.auction_manager.reauction_player(player_name)
     await interaction.response.send_message(message, ephemeral=not success)
@@ -2664,6 +3002,7 @@ async def reauction_player(interaction: discord.Interaction, player_name: str):
 
 @bot.tree.command(name="showunsold", description="Show all unsold players (Admin only)")
 @admin_or_owner_check()
+@channel_permission_check("showunsold")
 async def show_unsold(interaction: discord.Interaction):
     """Show all players that went unsold (in Accelerated list)"""
     unsold = bot.auction_manager.db.get_unsold_players()
@@ -2704,6 +3043,7 @@ async def show_unsold(interaction: discord.Interaction):
     description="Bring ALL unsold players back to auction (Admin only)",
 )
 @admin_or_owner_check()
+@channel_permission_check("reauctionall")
 async def reauction_all(interaction: discord.Interaction):
     """Re-auction all unsold players"""
     unsold = bot.auction_manager.db.get_unsold_players()
@@ -2731,6 +3071,7 @@ async def reauction_all(interaction: discord.Interaction):
     set_name="Set name to re-auction unsold players from (e.g., M1, BA1)"
 )
 @admin_or_owner_check()
+@channel_permission_check("reauctionlist")
 async def reauction_from_list(interaction: discord.Interaction, set_name: str):
     """Re-auction unsold players from a specific set"""
     unsold = bot.auction_manager.db.get_unsold_players()
@@ -2764,6 +3105,7 @@ async def reauction_from_list(interaction: discord.Interaction, set_name: str):
     player_names="Comma-separated player names (e.g., Player1, Player2, Player3)"
 )
 @admin_or_owner_check()
+@channel_permission_check("reauctionmultiple")
 async def reauction_multiple(interaction: discord.Interaction, player_names: str):
     """Re-auction multiple specific players"""
     await interaction.response.defer()
@@ -2807,6 +3149,7 @@ async def reauction_multiple(interaction: discord.Interaction, player_names: str
     name="findplayer", description="Find a player across lists, squads, and sales"
 )
 @app_commands.describe(name="Player name (partial matches allowed)")
+@channel_permission_check("findplayer")
 async def find_player_cmd(interaction: discord.Interaction, name: str):
     await interaction.response.defer()
     msg = bot.auction_manager.find_player(name)
@@ -2829,6 +3172,7 @@ async def find_player_cmd(interaction: discord.Interaction, name: str):
     price="New base price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)",
 )
 @admin_or_owner_check()
+@channel_permission_check("changebaseprice")
 async def change_base_price_cmd(
     interaction: discord.Interaction, players: str, price: float
 ):

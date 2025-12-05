@@ -1,0 +1,128 @@
+================================================================================
+               IPL AUCTION BOT - SLASH COMMANDS BY CHANNEL
+================================================================================
+Note: All Admin commands are available in ALL channels
+
+================================================================================
+CHANNEL 1: #auction-notify (Admin Only - Announcements, Stats & Logging)
+================================================================================
+Purpose: Admin-only channel for announcements, live stats display, and logs
+
+USER COMMANDS:
+#	Command			Description
+1	/tradelog		Show all trades
+2	/showunsold		Show all unsold players
+3	/showskipped		Show all skipped players
+
+ADMIN COMMANDS:
+#	Command			Description
+4	/announce		Send a custom announcement message
+5	/settradechannel	Set channel for trade log display
+6	/setstatschannel	Set channel for live stats updates
+7	/adminhelp		Show commands for Admins
+
+================================================================================
+CHANNEL 2: #auction-chat (Discussion - NO BIDDING)
+================================================================================
+Purpose: Users discuss teams, view squads, check purses - NO bidding allowed
+
+USER COMMANDS:
+#	Command			Description
+8	/myteam			Check which team you are assigned to
+9	/squad			View any team's squad and purse
+10	/showteams		Show all user-team assignments
+11	/showlists		Display all lists and their contents
+12	/showpurse		Display current team purses
+13	/status			Show current auction status
+14	/allsquads		View summary of all teams' squads
+15	/findplayer		Find a player across lists, squads, and sales
+16	/userhelp		Show commands for players/users
+
+ADMIN COMMANDS:
+#	Command			Description
+17	/assignteam		Assign a user to a team
+18	/assignteams		Assign multiple users to teams at once
+19	/unassignteam		Remove a user's team assignment
+20	/setpurse		Set a team's purse manually
+21	/resetpurses		Reset all team purses to configured values
+22	/trade			Trade a player from one team to another for cash
+23	/swap			Swap two players between teams
+24	/addtosquad		Manually add a player to a squad
+25	/release		Release a player from a team
+26	/releasemultiple	Release multiple players from teams
+27	/fixduplicates		Remove duplicate players from squads
+
+================================================================================
+CHANNEL 3: #auction-room (BIDDING ONLY)
+================================================================================
+Purpose: Live auction bidding - primary auction activity channel
+
+USER COMMANDS:
+#	Command			Description
+28	/bid			Place a bid for your team (auto-calculates amount)
+29	/bidhistory		Show recent bid history
+30	/teambids		Show bid history for a specific team
+
+ADMIN COMMANDS (Auction Control):
+#	Command			Description
+31	/start			Start the auction
+32	/stop			Stop the auction
+33	/pause			Pause the auction
+34	/resume			Resume the auction
+
+ADMIN COMMANDS (Player Management):
+#	Command			Description
+35	/skip			Skip current player - mark as unsold
+36	/skipset		Skip current set and move to next set
+37	/undobid		Undo the last bid
+38	/rollback		Undo the last sale
+39	/soldto			Manually mark current player as sold
+40	/unsold			Mark current player as unsold
+41	/reauction		Add an unsold player back to auction
+42	/reauctionall		Bring ALL unsold players back to auction
+43	/reauctionlist		Bring back unsold players from a specific set
+44	/reauctionmultiple	Re-auction multiple specific players by name
+
+ADMIN COMMANDS (List/Set Management):
+#	Command			Description
+45	/addplayer		Add a player to a list
+46	/addplayers		Add multiple players to a list
+47	/removeplayers		Remove multiple players from a list
+48	/loadcsv		Load players from a CSV file
+49	/loadsets		Load the NEXT N sets from IPL Excel
+50	/loadretained		Load retained players into DB and Excel
+51	/moveplayer		Move a player from one set to another
+52	/moveplayers		Move multiple players to a target set
+
+ADMIN COMMANDS (Settings):
+#	Command			Description
+53	/setcountdowngap	Set gap between last bid and start of countdown
+54	/setplayergap		Set gap between players in seconds
+55	/unsoldtime		Set the timeout for unsold players
+56	/changebaseprice	Change base price for players
+57	/clear			Clear auction data/buys/released but keep retained data
+
+================================================================================
+CHANNEL 4: #auction-team (Final Team Submissions)
+================================================================================
+Purpose: Users view their own team squad only - final team review
+
+USER COMMANDS:
+#	Command			Description
+58	/teamsquad		Show players in your team
+
+================================================================================
+                              SUMMARY
+================================================================================
+Channel              | User Commands | Admin Commands | Total
+---------------------|---------------|----------------|-------
+#auction-notify      |      3        |       4        |   7
+#auction-chat        |      9        |      11        |  20
+#auction-room        |      3        |      24        |  27
+#auction-team        |      1        |       0        |   1
+---------------------|---------------|----------------|-------
+TOTAL                |     14*       |      44*       |  58
+
+* Some commands may logically fit multiple channels but are placed in best fit
+* Admin commands work in ALL channels (no restriction needed)
+================================================================================

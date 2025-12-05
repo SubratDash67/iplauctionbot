@@ -336,6 +336,117 @@ class Database:
             except sqlite3.OperationalError:
                 pass
 
+            # Channel configuration table for command permissions
+            # channel_type: 'auction_room', 'auction_chat', 'auction_team', 'auction_notify'
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS channel_config (
+                    guild_id TEXT NOT NULL,
+                    channel_type TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    configured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guild_id, channel_type)
+                )
+            """
+            )
+
+    # ==================== CHANNEL CONFIGURATION OPERATIONS ====================
+
+    def set_channel_config(
+        self, guild_id: str, channel_type: str, channel_id: str
+    ) -> bool:
+        """Set a channel configuration for a specific channel type.
+
+        Args:
+            guild_id: The Discord guild ID
+            channel_type: One of 'auction_room', 'auction_chat', 'auction_team', 'auction_notify'
+            channel_id: The Discord channel ID
+
+        Returns:
+            True if successful
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO channel_config (guild_id, channel_type, channel_id)
+                VALUES (?, ?, ?)
+                """,
+                (guild_id, channel_type, channel_id),
+            )
+            return True
+
+    def get_channel_config(self, guild_id: str, channel_type: str) -> Optional[str]:
+        """Get the configured channel ID for a specific channel type.
+
+        Args:
+            guild_id: The Discord guild ID
+            channel_type: One of 'auction_room', 'auction_chat', 'auction_team', 'auction_notify'
+
+        Returns:
+            The channel ID if configured, None otherwise
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT channel_id FROM channel_config WHERE guild_id = ? AND channel_type = ?",
+                (guild_id, channel_type),
+            )
+            row = cursor.fetchone()
+            return row["channel_id"] if row else None
+
+    def get_all_channel_configs(self, guild_id: str) -> Dict[str, str]:
+        """Get all channel configurations for a guild.
+
+        Args:
+            guild_id: The Discord guild ID
+
+        Returns:
+            Dict mapping channel_type to channel_id
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT channel_type, channel_id FROM channel_config WHERE guild_id = ?",
+                (guild_id,),
+            )
+            return {row["channel_type"]: row["channel_id"] for row in cursor.fetchall()}
+
+    def clear_channel_config(self, guild_id: str, channel_type: str) -> bool:
+        """Remove a channel configuration.
+
+        Args:
+            guild_id: The Discord guild ID
+            channel_type: The channel type to remove
+
+        Returns:
+            True if a config was removed
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM channel_config WHERE guild_id = ? AND channel_type = ?",
+                (guild_id, channel_type),
+            )
+            return cursor.rowcount > 0
+
+    def clear_all_channel_configs(self, guild_id: str) -> int:
+        """Remove all channel configurations for a guild.
+
+        Args:
+            guild_id: The Discord guild ID
+
+        Returns:
+            Number of configs removed
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM channel_config WHERE guild_id = ?",
+                (guild_id,),
+            )
+            return cursor.rowcount
+
     # ==================== TEAM OPERATIONS ====================
 
     def init_teams(self, teams: Dict[str, int]):
