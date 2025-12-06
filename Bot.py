@@ -1437,9 +1437,8 @@ async def announce(
     mention_everyone: bool = False,
 ):
     embed = discord.Embed(
-        title=f"📢 {title.upper()}",
-        description=message,
-        color=discord.Color.blue(),
+        description=f"**{title.upper()}**\n\n{message}",
+        color=0xFF6B00,  # Orange color like in the image
         timestamp=discord.utils.utcnow(),
     )
     embed.set_footer(text=f"Announced by {interaction.user.display_name}")
