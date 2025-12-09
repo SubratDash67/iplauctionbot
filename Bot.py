@@ -2052,263 +2052,279 @@ async def countdown_loop(channel: discord.TextChannel):
         player_start_time = time_module.time()
         logger.info(f"[COUNTDOWN] Loop started at {player_start_time}")
 
-    if bot.auction_manager.last_bid_time <= 0:
-        bot.auction_manager.last_bid_time = player_start_time
-        logger.info(f"[COUNTDOWN] Initialized last_bid_time to {player_start_time}")
+        if bot.auction_manager.last_bid_time <= 0:
+            bot.auction_manager.last_bid_time = player_start_time
+            logger.info(f"[COUNTDOWN] Initialized last_bid_time to {player_start_time}")
 
-    last_msg = None
-    first_bid_placed = False
-    bidding_open_msg_sent = False
-    going_once_sent = False
-    going_twice_sent = False
-    going_thrice_sent = False
-    last_known_bid_time = bot.auction_manager.last_bid_time
+        last_msg = None
+        first_bid_placed = False
+        bidding_open_msg_sent = False
+        going_once_sent = False
+        going_twice_sent = False
+        going_thrice_sent = False
+        last_known_bid_time = bot.auction_manager.last_bid_time
 
-    while bot.auction_manager.active and not bot.auction_manager.paused:
-        logger.debug(
-            f"[COUNTDOWN] Loop iteration - active: {bot.auction_manager.active}, paused: {bot.auction_manager.paused}"
-        )
-        await asyncio.sleep(1)
-
-        now = time_module.time()
-        bot.auction_manager._load_state_from_db()
-        current_player_name = bot.auction_manager.current_player
-
-        if not current_player_name:
-            logger.warning(
-                f"[COUNTDOWN] current_player is None/empty after loading state - skipping iteration"
-            )
-            continue
-
-        logger.debug(f"[COUNTDOWN] Current player: {current_player_name}")
-
-        # Dynamic Gap
-        countdown_gap = getattr(bot.auction_manager, "countdown_gap", 0)
-
-        current_bid_time = bot.auction_manager.last_bid_time
-        if bot.auction_manager.highest_bidder is not None:
-            if not first_bid_placed:
-                first_bid_placed = True
-                last_known_bid_time = current_bid_time
-                going_once_sent = False
-                going_twice_sent = False
-                going_thrice_sent = False
-            elif current_bid_time > last_known_bid_time:
-                last_known_bid_time = current_bid_time
-                going_once_sent = False
-                going_twice_sent = False
-                going_thrice_sent = False
-
-        if not first_bid_placed:
-            elapsed_since_start = now - player_start_time
-            remaining = NO_START_TIMEOUT - int(elapsed_since_start)
+        while bot.auction_manager.active and not bot.auction_manager.paused:
             logger.debug(
-                f"[COUNTDOWN] No bids yet - elapsed: {elapsed_since_start:.1f}s, remaining: {remaining}s"
+                f"[COUNTDOWN] Loop iteration - active: {bot.auction_manager.active}, paused: {bot.auction_manager.paused}"
             )
+            await asyncio.sleep(1)
 
-            if (
-                elapsed_since_start >= BIDDING_OPEN_WARNING_TIME
-                and not bidding_open_msg_sent
-            ):
-                bidding_open_msg_sent = True
-                logger.info(
-                    f"[COUNTDOWN] Sending bidding open message for {current_player_name}"
-                )
-                await channel.send(
-                    f"📣 **BIDDING OPEN!** Waiting for first bid on **{current_player_name}**..."
-                )
+            now = time_module.time()
+            bot.auction_manager._load_state_from_db()
+            current_player_name = bot.auction_manager.current_player
 
-            if remaining <= 30 and remaining > 20 and not going_once_sent:
-                going_once_sent = True
-                logger.info(
-                    f"[COUNTDOWN] Sending 30s warning for {current_player_name}"
+            if not current_player_name:
+                logger.warning(
+                    f"[COUNTDOWN] current_player is None/empty after loading state - skipping iteration"
                 )
-                await channel.send(
-                    f"⏳ **{current_player_name}** going **UNSOLD** in **30 seconds**... Place your bids!"
-                )
-            if remaining <= 20 and remaining > 10 and not going_twice_sent:
-                going_twice_sent = True
-                logger.info(
-                    f"[COUNTDOWN] Sending 20s warning for {current_player_name}"
-                )
-                await channel.send(
-                    f"⚠️ **{current_player_name}** going **UNSOLD** in **20 seconds**!"
-                )
-            if remaining <= 10 and remaining > 0 and not going_thrice_sent:
-                going_thrice_sent = True
-                logger.info(
-                    f"[COUNTDOWN] Sending 10s warning for {current_player_name}"
-                )
-                await channel.send(
-                    f"🚨 **LAST CHANCE!** **{current_player_name}** going **UNSOLD** in **10 seconds**!"
-                )
-
-            if remaining <= 0:
-                logger.info(
-                    f"[COUNTDOWN] Timeout reached for {current_player_name} - finalizing as unsold"
-                )
-                if last_msg:
-                    try:
-                        await last_msg.delete()
-                    except (discord.NotFound, discord.HTTPException):
-                        pass
-
-                if not current_player_name:
-                    logger.warning(
-                        f"[COUNTDOWN] current_player_name is None/empty, starting next player"
-                    )
-                    await asyncio.sleep(2)
-                    await start_next_player(channel)
-                    return
-
-                success, team, amount = await bot.auction_manager.finalize_sale()
-                logger.info(
-                    f"[COUNTDOWN] Finalize result - success: {success}, team: {team}, amount: {amount}"
-                )
-
-                if success and team == "UNSOLD":
-                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
-                        current_player_name
-                    )
-                    sold_msg = bot.formatter.format_sold_message(
-                        current_player_name, team, amount, is_overseas
-                    )
-                    await channel.send(sold_msg)
-                else:
-                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
-                        current_player_name
-                    )
-                    player_display = (
-                        f"{current_player_name} ✈️"
-                        if is_overseas
-                        else current_player_name
-                    )
-                    await channel.send(
-                        f"⏰ No bids received - Player **{player_display}** goes **UNSOLD**"
-                    )
-
-                await asyncio.sleep(2)
-                logger.info(
-                    f"[COUNTDOWN] Starting next player after {current_player_name} went unsold"
-                )
-                await start_next_player(channel)
-                return
-
-        else:
-            # Bid placed - apply gap
-            elapsed_since_last_bid = now - bot.auction_manager.last_bid_time
-
-            # Subtract GAP from elapsed time.
-            # E.g. Gap=5, Elapsed=3 -> Effective=-2 (Waiting)
-            # Gap=5, Elapsed=6 -> Effective=1 (Countdown active)
-            effective_elapsed = elapsed_since_last_bid - countdown_gap
-
-            if effective_elapsed < 0:
-                # Still in gap period, silent wait
                 continue
 
-            remaining = NO_BID_TIMEOUT - int(effective_elapsed)
+            logger.debug(f"[COUNTDOWN] Current player: {current_player_name}")
 
-            current_bid = bot.auction_manager.current_bid
-            current_team = bot.auction_manager.highest_bidder
+            # Dynamic Gap
+            countdown_gap = getattr(bot.auction_manager, "countdown_gap", 0)
 
-            if remaining <= 12 and remaining > 8 and not going_once_sent:
-                going_once_sent = True
-                await channel.send(
-                    f"🔔 **GOING ONCE!** {format_amount(current_bid)} to **{current_team}**!"
+            current_bid_time = bot.auction_manager.last_bid_time
+            if bot.auction_manager.highest_bidder is not None:
+                if not first_bid_placed:
+                    first_bid_placed = True
+                    last_known_bid_time = current_bid_time
+                    going_once_sent = False
+                    going_twice_sent = False
+                    going_thrice_sent = False
+                elif current_bid_time > last_known_bid_time:
+                    last_known_bid_time = current_bid_time
+                    going_once_sent = False
+                    going_twice_sent = False
+                    going_thrice_sent = False
+
+            if not first_bid_placed:
+                elapsed_since_start = now - player_start_time
+                remaining = NO_START_TIMEOUT - int(elapsed_since_start)
+                logger.debug(
+                    f"[COUNTDOWN] No bids yet - elapsed: {elapsed_since_start:.1f}s, remaining: {remaining}s"
                 )
 
-            if remaining <= 8 and remaining > 4 and not going_twice_sent:
-                going_twice_sent = True
-                await channel.send(
-                    f"🔔🔔 **GOING TWICE!** {format_amount(current_bid)} to **{current_team}**!"
-                )
+                if (
+                    elapsed_since_start >= BIDDING_OPEN_WARNING_TIME
+                    and not bidding_open_msg_sent
+                ):
+                    bidding_open_msg_sent = True
+                    logger.info(
+                        f"[COUNTDOWN] Sending bidding open message for {current_player_name}"
+                    )
+                    await channel.send(
+                        f"📣 **BIDDING OPEN!** Waiting for first bid on **{current_player_name}**..."
+                    )
 
-            if remaining <= 4 and remaining > 0 and not going_thrice_sent:
-                going_thrice_sent = True
-                await channel.send(
-                    f"🔔🔔🔔 **GOING THRICE!** Last chance! {format_amount(current_bid)} to **{current_team}**!"
-                )
+                if remaining <= 30 and remaining > 20 and not going_once_sent:
+                    going_once_sent = True
+                    logger.info(
+                        f"[COUNTDOWN] Sending 30s warning for {current_player_name}"
+                    )
+                    await channel.send(
+                        f"⏳ **{current_player_name}** going **UNSOLD** in **30 seconds**... Place your bids!"
+                    )
+                if remaining <= 20 and remaining > 10 and not going_twice_sent:
+                    going_twice_sent = True
+                    logger.info(
+                        f"[COUNTDOWN] Sending 20s warning for {current_player_name}"
+                    )
+                    await channel.send(
+                        f"⚠️ **{current_player_name}** going **UNSOLD** in **20 seconds**!"
+                    )
+                if remaining <= 10 and remaining > 0 and not going_thrice_sent:
+                    going_thrice_sent = True
+                    logger.info(
+                        f"[COUNTDOWN] Sending 10s warning for {current_player_name}"
+                    )
+                    await channel.send(
+                        f"🚨 **LAST CHANCE!** **{current_player_name}** going **UNSOLD** in **10 seconds**!"
+                    )
 
-            if remaining <= 0:
+                if remaining <= 0:
+                    logger.info(
+                        f"[COUNTDOWN] Timeout reached for {current_player_name} - finalizing as unsold"
+                    )
+                    if last_msg:
+                        try:
+                            await last_msg.delete()
+                        except (discord.NotFound, discord.HTTPException):
+                            pass
+
+                    if not current_player_name:
+                        logger.warning(
+                            f"[COUNTDOWN] current_player_name is None/empty, starting next player"
+                        )
+                        await asyncio.sleep(2)
+                        await start_next_player(channel)
+                        return
+
+                    success, team, amount = await bot.auction_manager.finalize_sale()
+                    logger.info(
+                        f"[COUNTDOWN] Finalize result - success: {success}, team: {team}, amount: {amount}"
+                    )
+
+                    if success and team == "UNSOLD":
+                        is_overseas = (
+                            bot.auction_manager.db.get_player_overseas_from_list(
+                                current_player_name
+                            )
+                        )
+                        sold_msg = bot.formatter.format_sold_message(
+                            current_player_name, team, amount, is_overseas
+                        )
+                        await channel.send(sold_msg)
+                    else:
+                        is_overseas = (
+                            bot.auction_manager.db.get_player_overseas_from_list(
+                                current_player_name
+                            )
+                        )
+                        player_display = (
+                            f"{current_player_name} ✈️"
+                            if is_overseas
+                            else current_player_name
+                        )
+                        await channel.send(
+                            f"⏰ No bids received - Player **{player_display}** goes **UNSOLD**"
+                        )
+
+                    await asyncio.sleep(2)
+                    logger.info(
+                        f"[COUNTDOWN] Starting next player after {current_player_name} went unsold"
+                    )
+                    await start_next_player(channel)
+                    return
+
+            else:
+                # Bid placed - apply gap
+                elapsed_since_last_bid = now - bot.auction_manager.last_bid_time
+
+                # Subtract GAP from elapsed time.
+                # E.g. Gap=5, Elapsed=3 -> Effective=-2 (Waiting)
+                # Gap=5, Elapsed=6 -> Effective=1 (Countdown active)
+                effective_elapsed = elapsed_since_last_bid - countdown_gap
+
+                if effective_elapsed < 0:
+                    # Still in gap period, silent wait
+                    continue
+
+                remaining = NO_BID_TIMEOUT - int(effective_elapsed)
+
+                current_bid = bot.auction_manager.current_bid
+                current_team = bot.auction_manager.highest_bidder
+
+                if remaining <= 12 and remaining > 8 and not going_once_sent:
+                    going_once_sent = True
+                    await channel.send(
+                        f"🔔 **GOING ONCE!** {format_amount(current_bid)} to **{current_team}**!"
+                    )
+
+                if remaining <= 8 and remaining > 4 and not going_twice_sent:
+                    going_twice_sent = True
+                    await channel.send(
+                        f"🔔🔔 **GOING TWICE!** {format_amount(current_bid)} to **{current_team}**!"
+                    )
+
+                if remaining <= 4 and remaining > 0 and not going_thrice_sent:
+                    going_thrice_sent = True
+                    await channel.send(
+                        f"🔔🔔🔔 **GOING THRICE!** Last chance! {format_amount(current_bid)} to **{current_team}**!"
+                    )
+
+                if remaining <= 0:
+                    if last_msg:
+                        try:
+                            await last_msg.delete()
+                        except (discord.NotFound, discord.HTTPException):
+                            pass
+
+                    player_name = bot.auction_manager.current_player
+
+                    if not player_name:
+                        await asyncio.sleep(2)
+                        await start_next_player(channel)
+                        return
+
+                    squads = bot.auction_manager.db.get_all_squads()
+                    player_already_sold = False
+                    for squad in squads.values():
+                        for item in squad:
+                            pname = item[0]
+                            if pname.lower() == player_name.lower():
+                                player_already_sold = True
+                                break
+                        if player_already_sold:
+                            break
+
+                    if player_already_sold:
+                        bot.auction_manager._reset_player_state()
+                        bot.auction_manager._save_state_to_db()
+                        await asyncio.sleep(2)
+                        await start_next_player(channel)
+                        return
+
+                    success, team, amount = await bot.auction_manager.finalize_sale()
+
+                    if success and team and team != "UNSOLD":
+                        is_overseas = (
+                            bot.auction_manager.db.get_player_overseas_from_list(
+                                player_name
+                            )
+                        )
+                        sold_msg = bot.formatter.format_sold_message(
+                            player_name, team, amount, is_overseas
+                        )
+                        await channel.send(sold_msg)
+                        await channel.send(bot.auction_manager.get_purse_display())
+                        bot.create_background_task(bot.update_stats_display())
+                    elif success and team == "UNSOLD":
+                        is_overseas = (
+                            bot.auction_manager.db.get_player_overseas_from_list(
+                                player_name
+                            )
+                        )
+                        sold_msg = bot.formatter.format_sold_message(
+                            player_name, team, amount, is_overseas
+                        )
+                        await channel.send(sold_msg)
+                    else:
+                        is_overseas = (
+                            bot.auction_manager.db.get_player_overseas_from_list(
+                                player_name
+                            )
+                        )
+                        player_display = (
+                            f"{player_name} ✈️" if is_overseas else player_name
+                        )
+                        await channel.send(
+                            f"⚠️ Error finalizing sale for **{player_display}**. Moving to next player."
+                        )
+
+                    await asyncio.sleep(2)
+                    await start_next_player(channel)
+                    return
+
+            if bot.auction_manager.paused:
                 if last_msg:
                     try:
                         await last_msg.delete()
                     except (discord.NotFound, discord.HTTPException):
                         pass
-
-                player_name = bot.auction_manager.current_player
-
-                if not player_name:
-                    await asyncio.sleep(2)
-                    await start_next_player(channel)
-                    return
-
-                squads = bot.auction_manager.db.get_all_squads()
-                player_already_sold = False
-                for squad in squads.values():
-                    for item in squad:
-                        pname = item[0]
-                        if pname.lower() == player_name.lower():
-                            player_already_sold = True
-                            break
-                    if player_already_sold:
-                        break
-
-                if player_already_sold:
-                    bot.auction_manager._reset_player_state()
-                    bot.auction_manager._save_state_to_db()
-                    await asyncio.sleep(2)
-                    await start_next_player(channel)
-                    return
-
-                success, team, amount = await bot.auction_manager.finalize_sale()
-
-                if success and team and team != "UNSOLD":
-                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
-                        player_name
-                    )
-                    sold_msg = bot.formatter.format_sold_message(
-                        player_name, team, amount, is_overseas
-                    )
-                    await channel.send(sold_msg)
-                    await channel.send(bot.auction_manager.get_purse_display())
-                    bot.create_background_task(bot.update_stats_display())
-                elif success and team == "UNSOLD":
-                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
-                        player_name
-                    )
-                    sold_msg = bot.formatter.format_sold_message(
-                        player_name, team, amount, is_overseas
-                    )
-                    await channel.send(sold_msg)
-                else:
-                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
-                        player_name
-                    )
-                    player_display = f"{player_name} ✈️" if is_overseas else player_name
-                    await channel.send(
-                        f"⚠️ Error finalizing sale for **{player_display}**. Moving to next player."
-                    )
-
-                await asyncio.sleep(2)
-                await start_next_player(channel)
-                return
-
-        if bot.auction_manager.paused:
-            if last_msg:
-                try:
-                    await last_msg.delete()
-                except (discord.NotFound, discord.HTTPException):
-                    pass
-            break
+                break
 
     except asyncio.CancelledError:
         logger.info("[COUNTDOWN] Countdown loop cancelled")
         raise
     except Exception as e:
-        logger.error(f"[COUNTDOWN] Unexpected error in countdown loop: {e}", exc_info=True)
-        await channel.send(f"⚠️ **Error in auction countdown.** Please contact admin.\n```{str(e)}```")
+        logger.error(
+            f"[COUNTDOWN] Unexpected error in countdown loop: {e}", exc_info=True
+        )
+        await channel.send(
+            f"⚠️ **Error in auction countdown.** Please contact admin.\n```{str(e)}```"
+        )
         raise
 
 
