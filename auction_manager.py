@@ -574,8 +574,12 @@ class AuctionManager:
             self.db.create_list(skipped_list_name)
 
             # Move players to skipped list (now they won't conflict since they're auctioned)
+            # Preserve overseas status when moving to skipped list
             for player_name, base_price in players_in_set:
-                self.db.add_player_to_list(skipped_list_name, player_name, base_price)
+                is_overseas = self.db.get_player_overseas_from_list(player_name)
+                self.db.add_player_to_list_with_overseas_flag(
+                    skipped_list_name, player_name, base_price, is_overseas
+                )
 
             # Ensure skipped list is at the end of list order
             current_order = self.db.get_list_order()

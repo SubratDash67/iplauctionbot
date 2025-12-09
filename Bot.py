@@ -1152,7 +1152,12 @@ def paginate_lists_by_set(
             # Show entire list (no 15-player truncation)
             for player_name, base_price in players:
                 price_str = format_amount(base_price) if base_price else "20L"
-                set_content += f"  {player_name:30} | {price_str}\n"
+                # Check if player is overseas
+                is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
+                    player_name
+                )
+                overseas_marker = " ✈️" if is_overseas else ""
+                set_content += f"  {player_name:28}{overseas_marker} | {price_str}\n"
             set_content += "```"
 
             # If this set's content would exceed current page limit, flush and start new page
@@ -1172,7 +1177,12 @@ def paginate_lists_by_set(
             set_content = f"\n**{list_name.upper()}** ({len(players)} players):\n```\n"
             for player_name, base_price in players:
                 price_str = format_amount(base_price) if base_price else "20L"
-                set_content += f"  {player_name:30} | {price_str}\n"
+                # Check if player is overseas
+                is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
+                    player_name
+                )
+                overseas_marker = " ✈️" if is_overseas else ""
+                set_content += f"  {player_name:28}{overseas_marker} | {price_str}\n"
             set_content += "```"
 
             if (
@@ -1350,16 +1360,33 @@ async def skip_player(interaction: discord.Interaction):
         return
 
     player = bot.auction_manager.current_player
+    base_price = bot.auction_manager.base_price
     await bot.cancel_countdown_task()
 
+    # Mark player as unsold in sales table
     success, team, amount = await bot.auction_manager.finalize_sale()
 
-    if success:
-        await interaction.response.send_message(f"Player **{player}** SKIPPED (unsold)")
-    else:
-        bot.auction_manager._reset_player_state()
-        bot.auction_manager._save_state_to_db()
-        await interaction.response.send_message(f"Player **{player}** SKIPPED (unsold)")
+    # Also add to skipped list for tracking
+    skipped_list_name = "skipped"
+    bot.auction_manager.db.create_list(skipped_list_name)
+
+    # Get overseas status before adding to skipped list
+    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(player)
+    bot.auction_manager.db.add_player_to_list_with_overseas_flag(
+        skipped_list_name, player, base_price, is_overseas
+    )
+
+    # Ensure skipped list is at the end of list order
+    current_order = bot.auction_manager.db.get_list_order()
+    if skipped_list_name not in [o.lower() for o in current_order]:
+        current_order.append(skipped_list_name)
+        bot.auction_manager.db.set_list_order(current_order)
+
+    is_overseas_display = bot.auction_manager.db.get_player_overseas_from_list(player)
+    player_display = f"{player} ✈️" if is_overseas_display else player
+    await interaction.response.send_message(
+        f"Player **{player_display}** SKIPPED (unsold)"
+    )
 
     await asyncio.sleep(1)
     await start_next_player(interaction.channel)
@@ -1414,7 +1441,10 @@ async def show_skipped(interaction: discord.Interaction):
 
     for pname, base_price in skipped:
         price_str = format_amount(base_price) if base_price else "N/A"
-        msg += f"  {pname:30} | Base: {price_str}\n"
+        # Check if player is overseas
+        is_overseas = bot.auction_manager.db.get_player_overseas_from_list(pname)
+        overseas_marker = " ✈️" if is_overseas else ""
+        msg += f"  {pname:28}{overseas_marker} | Base: {price_str}\n"
 
     msg += "```\n"
     msg += "Skipped players will be auctioned at the end of all regular sets.\n"
@@ -2015,13 +2045,16 @@ async def start_next_player(channel: discord.TextChannel):
 
 async def countdown_loop(channel: discord.TextChannel):
     """Manual bidding timer with gap support"""
-    import time as time_module
-    from config import NO_BID_TIMEOUT, NO_START_TIMEOUT, BIDDING_OPEN_WARNING_TIME
+    try:
+        import time as time_module
+        from config import NO_BID_TIMEOUT, NO_START_TIMEOUT, BIDDING_OPEN_WARNING_TIME
 
-    player_start_time = time_module.time()
+        player_start_time = time_module.time()
+        logger.info(f"[COUNTDOWN] Loop started at {player_start_time}")
 
     if bot.auction_manager.last_bid_time <= 0:
         bot.auction_manager.last_bid_time = player_start_time
+        logger.info(f"[COUNTDOWN] Initialized last_bid_time to {player_start_time}")
 
     last_msg = None
     first_bid_placed = False
@@ -2032,11 +2065,22 @@ async def countdown_loop(channel: discord.TextChannel):
     last_known_bid_time = bot.auction_manager.last_bid_time
 
     while bot.auction_manager.active and not bot.auction_manager.paused:
+        logger.debug(
+            f"[COUNTDOWN] Loop iteration - active: {bot.auction_manager.active}, paused: {bot.auction_manager.paused}"
+        )
         await asyncio.sleep(1)
 
         now = time_module.time()
         bot.auction_manager._load_state_from_db()
         current_player_name = bot.auction_manager.current_player
+
+        if not current_player_name:
+            logger.warning(
+                f"[COUNTDOWN] current_player is None/empty after loading state - skipping iteration"
+            )
+            continue
+
+        logger.debug(f"[COUNTDOWN] Current player: {current_player_name}")
 
         # Dynamic Gap
         countdown_gap = getattr(bot.auction_manager, "countdown_gap", 0)
@@ -2058,33 +2102,51 @@ async def countdown_loop(channel: discord.TextChannel):
         if not first_bid_placed:
             elapsed_since_start = now - player_start_time
             remaining = NO_START_TIMEOUT - int(elapsed_since_start)
+            logger.debug(
+                f"[COUNTDOWN] No bids yet - elapsed: {elapsed_since_start:.1f}s, remaining: {remaining}s"
+            )
 
             if (
                 elapsed_since_start >= BIDDING_OPEN_WARNING_TIME
                 and not bidding_open_msg_sent
             ):
                 bidding_open_msg_sent = True
+                logger.info(
+                    f"[COUNTDOWN] Sending bidding open message for {current_player_name}"
+                )
                 await channel.send(
                     f"📣 **BIDDING OPEN!** Waiting for first bid on **{current_player_name}**..."
                 )
 
             if remaining <= 30 and remaining > 20 and not going_once_sent:
                 going_once_sent = True
+                logger.info(
+                    f"[COUNTDOWN] Sending 30s warning for {current_player_name}"
+                )
                 await channel.send(
                     f"⏳ **{current_player_name}** going **UNSOLD** in **30 seconds**... Place your bids!"
                 )
             if remaining <= 20 and remaining > 10 and not going_twice_sent:
                 going_twice_sent = True
+                logger.info(
+                    f"[COUNTDOWN] Sending 20s warning for {current_player_name}"
+                )
                 await channel.send(
                     f"⚠️ **{current_player_name}** going **UNSOLD** in **20 seconds**!"
                 )
             if remaining <= 10 and remaining > 0 and not going_thrice_sent:
                 going_thrice_sent = True
+                logger.info(
+                    f"[COUNTDOWN] Sending 10s warning for {current_player_name}"
+                )
                 await channel.send(
                     f"🚨 **LAST CHANCE!** **{current_player_name}** going **UNSOLD** in **10 seconds**!"
                 )
 
             if remaining <= 0:
+                logger.info(
+                    f"[COUNTDOWN] Timeout reached for {current_player_name} - finalizing as unsold"
+                )
                 if last_msg:
                     try:
                         await last_msg.delete()
@@ -2092,11 +2154,17 @@ async def countdown_loop(channel: discord.TextChannel):
                         pass
 
                 if not current_player_name:
+                    logger.warning(
+                        f"[COUNTDOWN] current_player_name is None/empty, starting next player"
+                    )
                     await asyncio.sleep(2)
                     await start_next_player(channel)
                     return
 
                 success, team, amount = await bot.auction_manager.finalize_sale()
+                logger.info(
+                    f"[COUNTDOWN] Finalize result - success: {success}, team: {team}, amount: {amount}"
+                )
 
                 if success and team == "UNSOLD":
                     is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
@@ -2120,6 +2188,9 @@ async def countdown_loop(channel: discord.TextChannel):
                     )
 
                 await asyncio.sleep(2)
+                logger.info(
+                    f"[COUNTDOWN] Starting next player after {current_player_name} went unsold"
+                )
                 await start_next_player(channel)
                 return
 
@@ -2231,6 +2302,14 @@ async def countdown_loop(channel: discord.TextChannel):
                 except (discord.NotFound, discord.HTTPException):
                     pass
             break
+
+    except asyncio.CancelledError:
+        logger.info("[COUNTDOWN] Countdown loop cancelled")
+        raise
+    except Exception as e:
+        logger.error(f"[COUNTDOWN] Unexpected error in countdown loop: {e}", exc_info=True)
+        await channel.send(f"⚠️ **Error in auction countdown.** Please contact admin.\n```{str(e)}```")
+        raise
 
 
 # ============================================================
