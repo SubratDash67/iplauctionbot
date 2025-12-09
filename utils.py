@@ -1028,28 +1028,37 @@ class MessageFormatter:
         return msg
 
     @staticmethod
-    def format_player_announcement(player: str, base_price: Optional[int]) -> str:
+    def format_player_announcement(
+        player: str, base_price: Optional[int], is_overseas: bool = False
+    ) -> str:
+        player_display = f"{player} ✈️" if is_overseas else player
         return (
-            f"**Next Player: {player}**\n"
+            f"**Next Player: {player_display}**\n"
             f"Base Price: {format_amount(base_price)}\n"
             f"Teams can now bid using `/bid`"
         )
 
     @staticmethod
-    def format_bid_message(team: str, amount: int, player: str) -> str:
-        return f"**{team}** bids **{format_amount(amount)}** for **{player}**"
+    def format_bid_message(
+        team: str, amount: int, player: str, is_overseas: bool = False
+    ) -> str:
+        player_display = f"{player} ✈️" if is_overseas else player
+        return f"**{team}** bids **{format_amount(amount)}** for **{player_display}**"
 
     @staticmethod
-    def format_sold_message(player: str, team: str, amount: int) -> str:
+    def format_sold_message(
+        player: str, team: str, amount: int, is_overseas: bool = False
+    ) -> str:
+        player_display = f"{player} ✈️" if is_overseas else player
         if team == "UNSOLD":
             return (
                 f"**UNSOLD**\n"
-                f"Player: **{player}**\n"
+                f"Player: **{player_display}**\n"
                 f"Base Price: **{format_amount(amount)}**"
             )
         return (
             f"**SOLD!**\n"
-            f"Player: **{player}**\n"
+            f"Player: **{player_display}**\n"
             f"Team: **{team}**\n"
             f"Final Price: **{format_amount(amount)}**"
         )

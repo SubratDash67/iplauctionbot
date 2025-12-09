@@ -802,10 +802,11 @@ async def rollback_sale(interaction: discord.Interaction):
 @admin_or_owner_check()
 @channel_permission_check("release")
 async def release_player(interaction: discord.Interaction, team: str, player: str):
+    await interaction.response.defer(ephemeral=True)
     success, message = bot.auction_manager.release_retained_player(team, player)
     if success:
         bot.create_background_task(bot.update_stats_display())
-    await interaction.response.send_message(message, ephemeral=True)
+    await interaction.followup.send(message, ephemeral=True)
 
 
 @bot.tree.command(
@@ -1994,11 +1995,17 @@ async def start_next_player(channel: discord.TextChannel):
 
         await asyncio.sleep(delay)
 
-        msg = bot.formatter.format_player_announcement(player_name, base_price)
+        is_overseas = bot.auction_manager.db.get_player_overseas_from_list(player_name)
+        msg = bot.formatter.format_player_announcement(
+            player_name, base_price, is_overseas
+        )
         await channel.send(msg)
         bot.auction_manager.reset_last_bid_time()
     else:
-        announcement = bot.formatter.format_player_announcement(player_name, base_price)
+        is_overseas = bot.auction_manager.db.get_player_overseas_from_list(player_name)
+        announcement = bot.formatter.format_player_announcement(
+            player_name, base_price, is_overseas
+        )
         await channel.send(announcement)
         bot.auction_manager.reset_last_bid_time()
 
@@ -2092,13 +2099,24 @@ async def countdown_loop(channel: discord.TextChannel):
                 success, team, amount = await bot.auction_manager.finalize_sale()
 
                 if success and team == "UNSOLD":
+                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
+                        current_player_name
+                    )
                     sold_msg = bot.formatter.format_sold_message(
-                        current_player_name, team, amount
+                        current_player_name, team, amount, is_overseas
                     )
                     await channel.send(sold_msg)
                 else:
+                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
+                        current_player_name
+                    )
+                    player_display = (
+                        f"{current_player_name} ✈️"
+                        if is_overseas
+                        else current_player_name
+                    )
                     await channel.send(
-                        f"⏰ No bids received - Player **{current_player_name}** goes **UNSOLD**"
+                        f"⏰ No bids received - Player **{player_display}** goes **UNSOLD**"
                     )
 
                 await asyncio.sleep(2)
@@ -2176,20 +2194,30 @@ async def countdown_loop(channel: discord.TextChannel):
                 success, team, amount = await bot.auction_manager.finalize_sale()
 
                 if success and team and team != "UNSOLD":
+                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
+                        player_name
+                    )
                     sold_msg = bot.formatter.format_sold_message(
-                        player_name, team, amount
+                        player_name, team, amount, is_overseas
                     )
                     await channel.send(sold_msg)
                     await channel.send(bot.auction_manager.get_purse_display())
                     bot.create_background_task(bot.update_stats_display())
                 elif success and team == "UNSOLD":
+                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
+                        player_name
+                    )
                     sold_msg = bot.formatter.format_sold_message(
-                        player_name, team, amount
+                        player_name, team, amount, is_overseas
                     )
                     await channel.send(sold_msg)
                 else:
+                    is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
+                        player_name
+                    )
+                    player_display = f"{player_name} ✈️" if is_overseas else player_name
                     await channel.send(
-                        f"⚠️ Error finalizing sale for **{player_name}**. Moving to next player."
+                        f"⚠️ Error finalizing sale for **{player_display}**. Moving to next player."
                     )
 
                 await asyncio.sleep(2)
@@ -2946,7 +2974,10 @@ async def sold_to(interaction: discord.Interaction, team: str):
     success, winning_team, amount = await bot.auction_manager.finalize_sale()
 
     if success:
-        sold_msg = bot.formatter.format_sold_message(player_name, winning_team, amount)
+        is_overseas = bot.auction_manager.db.get_player_overseas_from_list(player_name)
+        sold_msg = bot.formatter.format_sold_message(
+            player_name, winning_team, amount, is_overseas
+        )
         await interaction.response.send_message(sold_msg)
         if winning_team != "UNSOLD":
             await interaction.channel.send(bot.auction_manager.get_purse_display())
@@ -2980,13 +3011,18 @@ async def mark_unsold(interaction: discord.Interaction):
     success, team, amount = await bot.auction_manager.finalize_sale()
 
     if success:
-        sold_msg = bot.formatter.format_sold_message(player, "UNSOLD", amount)
+        is_overseas = bot.auction_manager.db.get_player_overseas_from_list(player)
+        sold_msg = bot.formatter.format_sold_message(
+            player, "UNSOLD", amount, is_overseas
+        )
         await interaction.response.send_message(sold_msg)
     else:
         bot.auction_manager._reset_player_state()
         bot.auction_manager._save_state_to_db()
+        is_overseas = bot.auction_manager.db.get_player_overseas_from_list(player)
+        player_display = f"{player} ✈️" if is_overseas else player
         await interaction.response.send_message(
-            f"❌ Player **{player}** marked **UNSOLD**. Use `/reauction {player}` to bring back."
+            f"❌ Player **{player_display}** marked **UNSOLD**. Use `/reauction {player}` to bring back."
         )
 
     await asyncio.sleep(1)
