@@ -270,14 +270,19 @@ class AuctionManager:
                     skipped_count += 1
                     continue
 
-                player_name = str(player_name_val).strip()
-                if not player_name or player_name.upper() in (
+                player_name_raw = str(player_name_val).strip()
+                if not player_name_raw or player_name_raw.upper() in (
                     "PLAYER",
                     "NAME",
                     "PLAYER NAME",
                 ):
                     skipped_count += 1
                     continue
+
+                # Check if player is overseas (has ✈️ emoji)
+                is_overseas = "✈️" in player_name_raw
+                # Remove emoji from name for storage
+                player_name = player_name_raw.replace("✈️", "").strip()
 
                 # Parse Set Number
                 if set_no_val is None:
@@ -334,7 +339,7 @@ class AuctionManager:
                     except Exception:
                         pass
 
-                players_by_set[set_key].append((player_name, base_price))
+                players_by_set[set_key].append((player_name, base_price, is_overseas))
 
             wb.close()
 
@@ -356,7 +361,10 @@ class AuctionManager:
             total_players = 0
             total_skipped = 0
             for set_name, players in players_by_set.items():
-                added, skipped = self.db.add_players_to_list(set_name, players)
+                # Players now have format: (name, base_price, is_overseas)
+                added, skipped = self.db.add_players_to_list_with_overseas(
+                    set_name, players
+                )
                 total_players += added
                 total_skipped += skipped
 
@@ -816,6 +824,20 @@ class AuctionManager:
                 f"Squad full! {team_upper} already has {MAX_SQUAD_SIZE} players.",
             )
 
+        # CHECK OVERSEAS LIMIT (8 max) - only if current player is overseas
+        is_current_player_overseas = self.db.get_player_overseas_from_list(
+            self.current_player
+        )
+        if is_current_player_overseas:
+            from config import MAX_OVERSEAS_LIMIT
+
+            current_overseas_count = self.db.get_overseas_count(team_upper)
+            if current_overseas_count >= MAX_OVERSEAS_LIMIT:
+                return BidResult(
+                    False,
+                    f"Overseas limit reached! {team_upper} already has {MAX_OVERSEAS_LIMIT} overseas players.",
+                )
+
         # PREVENT DOUBLE BIDDING: Check if this team is already the highest bidder
         if self.highest_bidder == team_upper:
             return BidResult(
@@ -1150,7 +1172,7 @@ class AuctionManager:
         return self.db.get_trade_channel()
 
     def manual_add_player(
-        self, team: str, player: str, price_cr: float
+        self, team: str, player: str, price_cr: float, is_overseas: bool = False
     ) -> Tuple[bool, str]:
         """Manually add a player to a squad"""
         if price_cr <= 0:
@@ -1175,7 +1197,7 @@ class AuctionManager:
         if not self.db.deduct_from_purse(team_upper, price):
             return False, "Insufficient purse."
 
-        self.db.add_to_squad(team_upper, player, price)
+        self.db.add_to_squad(team_upper, player, price, is_overseas=is_overseas)
 
         # Update Excel after manual add
         try:
@@ -1364,6 +1386,9 @@ class AuctionManager:
 
         p_name, salary = player_found
 
+        # Check if player is overseas before removing from squad
+        is_overseas = self.db.get_player_overseas_status(p_name)
+
         # Refund logic
         current_purse = teams[team_upper]
         new_purse = current_purse + salary
@@ -1378,10 +1403,14 @@ class AuctionManager:
         except Exception as e:
             logger.error(f"Error releasing player from DB: {e}")
 
-        # 3. Add released player to sales table as RELEASED (not UNSOLD)
+        # 3. Add released player to sales table as RELEASED (not UNSOLD) with overseas emoji
         try:
+            # Add ✈️ emoji to released player name if overseas
+            display_name = (
+                f"{p_name} ✈️" if is_overseas and "✈️" not in p_name else p_name
+            )
             self.db.record_sale(
-                f"{p_name} (RELEASED from {team_upper})",
+                f"{display_name} (RELEASED from {team_upper})",
                 "RELEASED",
                 salary,
                 total_bids=0,
@@ -1395,7 +1424,10 @@ class AuctionManager:
 
         # IMPORTANT: per request, set base price of released players to 2 Cr
         two_cr = 2 * 10_000_000  # 2 Crore in rupees
-        self.db.add_player_to_list(released_list_name, p_name, two_cr)
+        # Add player with overseas status preserved
+        self.db.add_player_to_list_with_overseas_flag(
+            released_list_name, p_name, two_cr, is_overseas
+        )
 
         # Ensure "released" list is at the START of list order
         current_order = self.db.get_list_order()
@@ -1898,7 +1930,10 @@ class AuctionManager:
             msg += "📋 Unauctioned Lists:\n```\n"
             for pname, lname, price in list_matches:
                 price_str = format_amount(price) if price else "N/A"
-                msg += f"{pname:30} | Set: {lname.upper():8} | Base: {price_str}\n"
+                # Check if overseas
+                is_overseas = self.db.get_player_overseas_from_list(pname)
+                overseas_marker = " ✈️" if is_overseas else ""
+                msg += f"{pname:30}{overseas_marker} | Set: {lname.upper():8} | Base: {price_str}\n"
             msg += "```\n"
         else:
             msg += "📋 Unauctioned Lists: None\n"
@@ -1906,7 +1941,10 @@ class AuctionManager:
         if squad_matches:
             msg += "🟦 Squad (Owned Players):\n```\n"
             for pname, team, price in squad_matches:
-                msg += f"{pname:30} | Team: {team:6} | Salary: {format_amount(price)}\n"
+                # Check if overseas from squad
+                is_overseas = self.db.get_player_overseas_status(pname)
+                overseas_marker = " ✈️" if is_overseas else ""
+                msg += f"{pname:30}{overseas_marker} | Team: {team:6} | Salary: {format_amount(price)}\n"
             msg += "```\n"
         else:
             msg += "🟦 Squad (Owned Players): None\n"

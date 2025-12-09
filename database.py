@@ -688,6 +688,45 @@ class Database:
             )
             return True
 
+    def add_player_to_list_with_overseas_flag(
+        self,
+        list_name: str,
+        player_name: str,
+        base_price: Optional[int] = None,
+        is_overseas: bool = False,
+    ) -> bool:
+        """Add a single player to a list with overseas flag and duplicate checking.
+
+        Returns False if player already exists in:
+        - player_lists (not yet auctioned)
+        - team_squads (already sold/retained)
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # Check for duplicates in player_lists (case-insensitive)
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM player_lists WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
+            )
+            if cursor.fetchone()["cnt"] > 0:
+                return False
+
+            # Check for duplicates in team_squads (case-insensitive)
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM team_squads WHERE LOWER(player_name) = LOWER(?)",
+                (player_name,),
+            )
+            if cursor.fetchone()["cnt"] > 0:
+                return False
+
+            # Insert player with overseas status
+            cursor.execute(
+                "INSERT INTO player_lists (list_name, player_name, base_price, is_overseas) VALUES (?, ?, ?, ?)",
+                (list_name.lower(), player_name, base_price, 1 if is_overseas else 0),
+            )
+            return True
+
     def add_player_to_list(
         self, list_name: str, player_name: str, base_price: Optional[int] = None
     ) -> bool:
@@ -740,6 +779,58 @@ class Database:
             )
             return cursor.rowcount
 
+    def add_players_to_list_with_overseas(
+        self, list_name: str, players: List[Tuple[str, Optional[int], bool]]
+    ):
+        """Add players to a list with overseas status and duplicate checking.
+
+        Args:
+            list_name: Name of the list
+            players: List of (player_name, base_price, is_overseas) tuples
+
+        Skips players who are:
+        1. Already in any player_list (not yet auctioned)
+        2. Already in any team's squad (retained, bought, or traded)
+        """
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+
+            # Get all existing players in player_lists (case-insensitive) - only non-auctioned
+            cursor.execute(
+                "SELECT LOWER(player_name) FROM player_lists WHERE auctioned = 0"
+            )
+            existing_in_lists = {row[0] for row in cursor.fetchall()}
+
+            # Get all existing players in team_squads (case-insensitive)
+            cursor.execute("SELECT LOWER(player_name) FROM team_squads")
+            existing_in_squads = {row[0] for row in cursor.fetchall()}
+
+            added_count = 0
+            skipped_count = 0
+            for player_name, base_price, is_overseas in players:
+                player_lower = player_name.lower()
+                # Skip if player already exists anywhere
+                if (
+                    player_lower in existing_in_lists
+                    or player_lower in existing_in_squads
+                ):
+                    skipped_count += 1
+                    continue
+
+                cursor.execute(
+                    "INSERT INTO player_lists (list_name, player_name, base_price, is_overseas) VALUES (?, ?, ?, ?)",
+                    (
+                        list_name.lower(),
+                        player_name,
+                        base_price,
+                        1 if is_overseas else 0,
+                    ),
+                )
+                existing_in_lists.add(player_lower)  # Track newly added players
+                added_count += 1
+
+            return added_count, skipped_count
+
     def add_players_to_list(
         self, list_name: str, players: List[Tuple[str, Optional[int]]]
     ):
@@ -775,8 +866,8 @@ class Database:
                     continue
 
                 cursor.execute(
-                    "INSERT INTO player_lists (list_name, player_name, base_price) VALUES (?, ?, ?)",
-                    (list_name.lower(), player_name, base_price),
+                    "INSERT INTO player_lists (list_name, player_name, base_price, is_overseas) VALUES (?, ?, ?, ?)",
+                    (list_name.lower(), player_name, base_price, 0),
                 )
                 existing_in_lists.add(player_lower)  # Track newly added players
                 added_count += 1
@@ -2119,6 +2210,16 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ? AND is_overseas = 1",
+                (team_code,),
+            )
+            return cursor.fetchone()["cnt"]
+
+    def get_squad_count(self, team_code: str) -> int:
+        """Get total player count in a team's squad"""
+        with self._transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) as cnt FROM team_squads WHERE team_code = ?",
                 (team_code,),
             )
             return cursor.fetchone()["cnt"]

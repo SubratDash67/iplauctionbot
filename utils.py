@@ -283,11 +283,14 @@ class FileManager:
     def initialize_excel_with_retained_players(
         filepath: str,
         teams: Dict[str, int],
-        retained_data: Dict[str, List[Tuple[str, int]]],
+        squad_data: Dict[str, List[Tuple[str, int, bool]]],
     ) -> None:
-        """Initialize Excel file with retained players already in team sheets.
+        """Initialize Excel file with squad data (usually retained players) in team sheets.
 
-        This should be called at bot startup to populate team sheets with retained players.
+        Args:
+            filepath: Path to Excel file
+            teams: Dict of team purses
+            squad_data: Dict mapping team_code to list of (player_name, price, is_overseas) tuples
         """
         try:
             from config import TEAMS as TEAM_CONFIG
@@ -305,7 +308,7 @@ class FileManager:
             )
             summary_font = Font(bold=True)
 
-            # Update each team sheet with their retained players only
+            # Update each team sheet with their squad data
             for team_code in sorted(TEAM_CONFIG.keys()):
                 if team_code in wb.sheetnames:
                     del wb[team_code]
@@ -317,11 +320,11 @@ class FileManager:
                     cell.font = header_font
                     cell.alignment = Alignment(horizontal="center")
 
-                retained = retained_data.get(team_code, [])
+                squad = squad_data.get(team_code, [])
                 total_spent = 0
                 overseas_count = 0
-                for item in retained:
-                    # Handle both (player, price) and (player, price, is_overseas) formats
+                for item in squad:
+                    # squad_data format: (player_name, price, is_overseas)
                     player_name = item[0]
                     price = item[1]
                     is_overseas = item[2] if len(item) > 2 else False
@@ -338,7 +341,7 @@ class FileManager:
                 purse_left = teams.get(team_code, 0)
 
                 summary_row = ts.max_row + 1
-                ts.append(["Total Players", len(retained), ""])
+                ts.append(["Total Players", len(squad), ""])
                 ts.append(["Overseas Players", overseas_count, ""])
                 ts.append(["Total Spent", format_amount(total_spent), ""])
                 ts.append(["Purse Remaining", format_amount(purse_left), ""])
@@ -365,10 +368,10 @@ class FileManager:
                 cell.alignment = Alignment(horizontal="center")
 
             for team_code in sorted(TEAM_CONFIG.keys()):
-                retained = retained_data.get(team_code, [])
+                squad = squad_data.get(team_code, [])
                 total_spent = 0
                 overseas_count = 0
-                for item in retained:
+                for item in squad:
                     total_spent += item[1]
                     if len(item) > 2 and item[2]:
                         overseas_count += 1
@@ -376,7 +379,7 @@ class FileManager:
                 summary_sheet.append(
                     [
                         team_code,
-                        len(retained),
+                        len(squad),
                         overseas_count,
                         format_amount(total_spent),
                         format_amount(remaining),
@@ -389,7 +392,12 @@ class FileManager:
 
     @staticmethod
     def save_player_to_excel(
-        filepath: str, player: str, team: str, price: int, remaining_purse: int
+        filepath: str,
+        player: str,
+        team: str,
+        price: int,
+        remaining_purse: int,
+        is_overseas: bool = False,
     ) -> None:
         """Save a sold player to the Excel file"""
         try:
@@ -400,8 +408,12 @@ class FileManager:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             # Format price as cr/L for readability
             formatted_price = format_amount(price)
+            # Add ✈️ emoji for overseas players
+            display_name = (
+                f"{player} ✈️" if is_overseas and "✈️" not in player else player
+            )
             # Sanitize player name to prevent formula injection
-            safe_player = sanitize_csv_value(player)
+            safe_player = sanitize_csv_value(display_name)
             sheet.append([safe_player, team, formatted_price, timestamp])
             wb.save(filepath)
         except Exception as e:
@@ -493,7 +505,13 @@ class FileManager:
                 cell.alignment = Alignment(horizontal="center")
 
             for player_name, set_name, base_price in unsold_players:
-                safe_player = sanitize_csv_value(player_name)
+                # Add ✈️ emoji if not already present and player is overseas
+                display_name = player_name
+                if "✈️" not in player_name:
+                    # Check if player name originally had emoji (it might have been removed)
+                    # For now, preserve as-is since unsold players should retain their original names
+                    pass
+                safe_player = sanitize_csv_value(display_name)
                 us.append(
                     [
                         safe_player,
@@ -540,7 +558,10 @@ class FileManager:
                 cell.alignment = Alignment(horizontal="center")
 
             for player_name, info, price in released_players:
-                safe_player = sanitize_csv_value(player_name)
+                # Player names from sales table should already have ✈️ if they were overseas
+                # Just preserve the display name as-is
+                display_name = player_name
+                safe_player = sanitize_csv_value(display_name)
                 rp.append(
                     [
                         safe_player,
@@ -862,8 +883,27 @@ class FileManager:
                     timestamp = sale.get(
                         "sold_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     )
+                    player_name = sale.get("player_name", "Unknown")
+
+                    # Check if player is overseas from team_squads and add ✈️ emoji
+                    is_overseas = False
+                    if team_squads and team_code in team_squads:
+                        for squad_player in team_squads[team_code]:
+                            if squad_player[0].lower() == player_name.lower():
+                                is_overseas = (
+                                    squad_player[2] if len(squad_player) > 2 else False
+                                )
+                                break
+
+                    # Add ✈️ emoji for overseas players if not already present
+                    display_name = (
+                        f"{player_name} ✈️"
+                        if is_overseas and "✈️" not in player_name
+                        else player_name
+                    )
+
                     # Sanitize player name to prevent formula injection
-                    safe_player = sanitize_csv_value(sale.get("player_name", "Unknown"))
+                    safe_player = sanitize_csv_value(display_name)
                     sheet.append(
                         [
                             safe_player,

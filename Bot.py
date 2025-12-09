@@ -862,13 +862,20 @@ async def release_multiple(interaction: discord.Interaction, releases: str):
     team="Team Code",
     player="Player Name",
     price="Price in Crores (e.g., 2 = 2Cr, 0.5 = 50L)",
+    is_overseas="Is this an overseas player? (True/False, default: False)",
 )
 @admin_or_owner_check()
 @channel_permission_check("addtosquad")
 async def add_to_squad(
-    interaction: discord.Interaction, team: str, player: str, price: float
+    interaction: discord.Interaction,
+    team: str,
+    player: str,
+    price: float,
+    is_overseas: bool = False,
 ):
-    success, msg = bot.auction_manager.manual_add_player(team, player, price)
+    success, msg = bot.auction_manager.manual_add_player(
+        team, player, price, is_overseas
+    )
     if success:
         bot.create_background_task(bot.update_stats_display())
     await interaction.response.send_message(msg)
