@@ -1156,8 +1156,12 @@ def paginate_lists_by_set(
                 is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
                     player_name
                 )
-                overseas_marker = " ✈️" if is_overseas else ""
-                set_content += f"  {player_name:28}{overseas_marker} | {price_str}\n"
+                # Add emoji right after name, then pad the combined string
+                if is_overseas:
+                    display_name = f"{player_name} ✈️"
+                else:
+                    display_name = player_name
+                set_content += f"  {display_name:32} | {price_str}\n"
             set_content += "```"
 
             # If this set's content would exceed current page limit, flush and start new page
@@ -1181,8 +1185,12 @@ def paginate_lists_by_set(
                 is_overseas = bot.auction_manager.db.get_player_overseas_from_list(
                     player_name
                 )
-                overseas_marker = " ✈️" if is_overseas else ""
-                set_content += f"  {player_name:28}{overseas_marker} | {price_str}\n"
+                # Add emoji right after name, then pad the combined string
+                if is_overseas:
+                    display_name = f"{player_name} ✈️"
+                else:
+                    display_name = player_name
+                set_content += f"  {display_name:32} | {price_str}\n"
             set_content += "```"
 
             if (
@@ -1639,9 +1647,12 @@ class ClearConfirmView(discord.ui.View):
 @channel_permission_check("clear")
 async def clear_auction(interaction: discord.Interaction):
     """Clears trade, released, and auction data but keeps retained players."""
+    # Defer immediately to prevent timeout
+    await interaction.response.defer(ephemeral=True)
+
     # Show confirmation with backup option
     view = ClearConfirmView(interaction.user.id)
-    await interaction.response.send_message(
+    await interaction.followup.send(
         "**⚠️ Clear Auction Data**\n\n"
         "This will:\n"
         "• Remove all auction buys, trades, and released players\n"
@@ -1664,7 +1675,6 @@ async def clear_auction(interaction: discord.Interaction):
         pass
 
     if not view.confirmed:
-        await interaction.followup.send("❌ Clear operation cancelled.", ephemeral=True)
         return
 
     # Remove duplicates first
@@ -3347,8 +3357,10 @@ async def on_app_command_error(
                 await interaction.response.send_message(error_msg, ephemeral=True)
             else:
                 await interaction.followup.send(error_msg, ephemeral=True)
-        except discord.HTTPException:
-            logger.error(f"Could not send error message to user: {error_msg}")
+        except (discord.HTTPException, discord.errors.NotFound) as e:
+            logger.error(
+                f"Could not send error message to user: {error_msg} ({type(e).__name__})"
+            )
 
 
 if __name__ == "__main__":
