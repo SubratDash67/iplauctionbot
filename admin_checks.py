@@ -72,6 +72,7 @@ AUCTION_CHAT_COMMANDS = [
     "release",
     "releasemultiple",
     "fixduplicates",  # Admin player management
+    "setlistorder",  # Admin list ordering
 ]
 
 # Commands allowed in #auction-team (final team submissions)

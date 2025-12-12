@@ -356,7 +356,7 @@ async def set_notify_auction(
 
 @bot.tree.command(
     name="showchannelconfig",
-    description="Show current channel configurations (Admin only)",
+    description="Show current channel configurations (Admin only)"
 )
 @admin_or_owner_check()
 async def show_channel_config(interaction: discord.Interaction):
@@ -1135,7 +1135,7 @@ def paginate_lists_by_set(
 
     Keeps the same formatted layout:
     **SETNAME** (N players):
-    ```
+    ``` 
       Player Name                   | Price
       ...
     ```
@@ -1232,6 +1232,85 @@ async def show_lists(interaction: discord.Interaction):
         view = ShowListsView(pages, interaction.user.id)
         await interaction.response.send_message(pages[0], view=view)
         view.message = await interaction.original_response()
+
+
+@bot.tree.command(
+    name="setlistorder",
+    description="Reorder the player lists/sets in the auction queue (Admin only)",
+)
+@app_commands.describe(
+    order="Comma-separated list names in desired order (e.g., BA1, M1, released, BA2)"
+)
+@admin_or_owner_check()
+@channel_permission_check("setlistorder")
+async def set_list_order(interaction: discord.Interaction, order: str):
+    """Manually set the order in which player lists/sets will be auctioned"""
+    await interaction.response.defer(ephemeral=True)
+
+    # Parse the order string
+    new_order = [name.strip() for name in order.split(",") if name.strip()]
+
+    if not new_order:
+        await interaction.followup.send(
+            "❌ No valid list names provided. Please use comma-separated list names.",
+            ephemeral=True,
+        )
+        return
+
+    # Get current player lists to validate
+    player_lists = bot.auction_manager.player_lists
+
+    if not player_lists:
+        await interaction.followup.send(
+            "❌ No player lists exist yet. Use `/loadsets` first.", ephemeral=True
+        )
+        return
+
+    # Validate all provided list names exist
+    invalid_lists = [
+        name for name in new_order if name.lower() not in [l.lower() for l in player_lists.keys()]
+    ]
+
+    # Find lists that exist but weren't included in the new order
+    existing_lists_lower = {l.lower(): l for l in player_lists.keys()}
+    new_order_lower = {n.lower() for n in new_order}
+    missing_lists = [
+        existing_lists_lower[l] for l in existing_lists_lower.keys() if l not in new_order_lower
+    ]
+
+    # Build the final order - use case from new_order, match against existing lists
+    final_order = []
+    for name in new_order:
+        # Find the actual case-sensitive name from player_lists
+        matching = [l for l in player_lists.keys() if l.lower() == name.lower()]
+        if matching:
+            final_order.append(matching[0])
+
+    # Add any missing lists at the end
+    final_order.extend(missing_lists)
+
+    # Save to database
+    success = bot.auction_manager.db.set_list_order(final_order)
+
+    if success:
+        # No need to reload - the property reads from DB directly
+        msg = "✅ **List order updated successfully!**\n\n"
+        msg += "**New auction order:**\n"
+        for i, list_name in enumerate(final_order, 1):
+            player_count = len(player_lists.get(list_name, []))
+            msg += f"{i}. **{list_name.upper()}** ({player_count} players)\n"
+
+        if invalid_lists:
+            msg += f"\n⚠️ **Warning:** These lists don't exist and were ignored: {', '.join(invalid_lists)}"
+
+        if missing_lists:
+            msg += f"\n📝 **Note:** These existing lists were added at the end: {', '.join(missing_lists)}"
+
+        await interaction.followup.send(msg, ephemeral=True)
+    else:
+        await interaction.followup.send(
+            "❌ Failed to update list order in database.", ephemeral=True
+        )
 
 
 # ============================================================
@@ -1516,7 +1595,7 @@ async def set_stats_channel(
 
 @bot.tree.command(
     name="setcountdowngap",
-    description="Set gap between last bid and start of countdown (Admin only)",
+    description="Set gap between last bid and start of countdown (Admin only)"
 )
 @app_commands.describe(seconds="Gap duration in seconds")
 @admin_or_owner_check()
@@ -1557,7 +1636,7 @@ async def set_purse(interaction: discord.Interaction, team: str, amount: int):
 
 @bot.tree.command(
     name="resetpurses",
-    description="Reset all team purses to configured values (Admin only)",
+    description="Reset all team purses to configured values (Admin only)"
 )
 @admin_or_owner_check()
 @channel_permission_check("resetpurses")
@@ -1745,7 +1824,7 @@ async def move_player(interaction: discord.Interaction, player: str, target_set:
 
 @bot.tree.command(
     name="moveplayers",
-    description="Move multiple players to a target set (Admin only)",
+    description="Move multiple players to a target set (Admin only)"
 )
 @app_commands.describe(
     players="Comma-separated player names (e.g., Player1, Player2, Player3)",
@@ -1803,14 +1882,14 @@ async def set_unsold_time(interaction: discord.Interaction, seconds: int):
     config.NO_START_TIMEOUT = seconds
     await interaction.response.send_message(
         f"✅ Unsold timeout set to **{seconds} seconds**.\n"
-        f"Players with no bids will now go unsold after {seconds}s.",
+        f"Players with no bids will now start the unsold countdown after {seconds}s.",
         ephemeral=True,
     )
 
 
 @bot.tree.command(
     name="fixduplicates",
-    description="Remove duplicate players from squads (Admin only)",
+    description="Remove duplicate players from squads (Admin only)"
 )
 @admin_or_owner_check()
 @channel_permission_check("fixduplicates")
@@ -2049,25 +2128,49 @@ async def start_next_player(channel: discord.TextChannel):
         await channel.send(announcement)
         bot.auction_manager.reset_last_bid_time()
 
-    if not bot.countdown_task or bot.countdown_task.done():
-        bot.countdown_task = asyncio.create_task(countdown_loop(channel))
+    # Always (re)start a countdown loop for the currently active player.
+    # Cancel previous countdown to ensure a fresh loop with fresh timers.
+    await bot.cancel_countdown_task()
+    bot.countdown_task = asyncio.create_task(countdown_loop(channel))
 
 
 async def countdown_loop(channel: discord.TextChannel):
-    """Manual bidding timer with gap support"""
+    """Manual bidding timer with gap support
+
+    Behaviour:
+    - After a player is announced, at 10 seconds we ALWAYS show:
+      "📣 BIDDING OPEN! Waiting for first bid on {player-name}..."
+      (this happens for every player)
+    - The admin can control when the unsold countdown starts by using /unsoldtime,
+      which sets config.NO_START_TIMEOUT. The unsold countdown begins only
+      after NO_START_TIMEOUT seconds from announcement.
+    - When the unsold countdown runs, warnings are compact and do NOT include times.
+    - Bid-based countdowns (when bids exist) use concise going-once/twice/thrice messages.
+    """
     try:
         import time as time_module
-        from config import NO_BID_TIMEOUT, NO_START_TIMEOUT, BIDDING_OPEN_WARNING_TIME
+        import config
+        from config import NO_BID_TIMEOUT
 
-        # Use the last_bid_time that was just set by reset_last_bid_time()
+        # Force BIDDING_OPEN_WARN_AFTER to 10s per user's request
+        BIDDING_OPEN_WARN_AFTER = 10
+
+        # Duration of the short unsold countdown once NO_START_TIMEOUT has elapsed.
+        START_COUNTDOWN_DURATION = 15  # seconds total countdown once started
+        # thresholds (used for deciding when to send messages) - messages will not include numbers
+        START_WARN_1_AT = 10
+        START_WARN_2_AT = 5
+        START_WARN_3_AT = 3
+
+        prev_player_name = None
         player_start_time = bot.auction_manager.last_bid_time
 
         last_msg = None
         first_bid_placed = False
         bidding_open_msg_sent = False
-        warning_30s_sent = False
-        warning_20s_sent = False
-        warning_10s_sent = False
+        start_warn_1_sent = False
+        start_warn_2_sent = False
+        start_warn_3_sent = False
         going_once_sent = False
         going_twice_sent = False
         going_thrice_sent = False
@@ -2080,14 +2183,33 @@ async def countdown_loop(channel: discord.TextChannel):
             bot.auction_manager._load_state_from_db()
             current_player_name = bot.auction_manager.current_player
 
+            # If no player currently being auctioned, skip
             if not current_player_name:
+                prev_player_name = None
+                await asyncio.sleep(1)
                 continue
+
+            # Detect player change and reset timers/flags so every player gets fresh behavior
+            if current_player_name != prev_player_name:
+                prev_player_name = current_player_name
+                player_start_time = bot.auction_manager.last_bid_time
+                # reset flags for the new player
+                first_bid_placed = False
+                bidding_open_msg_sent = False
+                start_warn_1_sent = False
+                start_warn_2_sent = False
+                start_warn_3_sent = False
+                going_once_sent = False
+                going_twice_sent = False
+                going_thrice_sent = False
+                last_known_bid_time = bot.auction_manager.last_bid_time
 
             # Dynamic Gap
             countdown_gap = getattr(bot.auction_manager, "countdown_gap", 0)
 
             current_bid_time = bot.auction_manager.last_bid_time
             if bot.auction_manager.highest_bidder is not None:
+                # A bid exists -> follow bid-based countdown behavior
                 if not first_bid_placed:
                     first_bid_placed = True
                     last_known_bid_time = current_bid_time
@@ -2102,35 +2224,47 @@ async def countdown_loop(channel: discord.TextChannel):
 
             if not first_bid_placed:
                 elapsed_since_start = now - player_start_time
-                remaining = NO_START_TIMEOUT - elapsed_since_start
 
-                # Send messages in chronological order
-                if (
-                    elapsed_since_start >= BIDDING_OPEN_WARNING_TIME
-                    and not bidding_open_msg_sent
-                ):
+                # Always show BIDDING OPEN at 10s after announcement (if not yet shown)
+                if elapsed_since_start >= BIDDING_OPEN_WARN_AFTER and not bidding_open_msg_sent:
                     bidding_open_msg_sent = True
-                    await channel.send(
-                        f"📣 **BIDDING OPEN!** Waiting for first bid on **{current_player_name}**..."
-                    )
+                    try:
+                        await channel.send(
+                            f"📣 **BIDDING OPEN!** Waiting for first bid on **{current_player_name}**..."
+                        )
+                    except Exception:
+                        pass
 
-                if remaining <= 30 and remaining > 20 and not warning_30s_sent:
-                    warning_30s_sent = True
-                    await channel.send(
-                        f"⏳ **{current_player_name}** going **UNSOLD** in **30 seconds**... Place your bids!"
-                    )
-                elif remaining <= 20 and remaining > 10 and not warning_20s_sent:
-                    warning_20s_sent = True
-                    await channel.send(
-                        f"⚠️ **{current_player_name}** going **UNSOLD** in **20 seconds**!"
-                    )
-                elif remaining <= 10 and remaining > 0 and not warning_10s_sent:
-                    warning_10s_sent = True
-                    await channel.send(
-                        f"🚨 **LAST CHANCE!** **{current_player_name}** going **UNSOLD** in **10 seconds**!"
-                    )
+                # If still within the configured NO_START_TIMEOUT window, we wait silently
+                NO_START_TIMEOUT = getattr(config, "NO_START_TIMEOUT", 60)
+                if elapsed_since_start < NO_START_TIMEOUT:
+                    # Still in waiting period - don't show countdown warnings yet
+                    continue
 
+                # Phase: NO_START_TIMEOUT elapsed -> start compact unsold countdown
+                countdown_elapsed = elapsed_since_start - NO_START_TIMEOUT
+                remaining = START_COUNTDOWN_DURATION - countdown_elapsed
+
+                # Send compact warnings when crossing thresholds — messages do NOT show numeric times
+                if remaining <= START_COUNTDOWN_DURATION and remaining > START_WARN_3_AT and not start_warn_2_sent:
+                    start_warn_2_sent = True
+                    try:
+                        await channel.send(
+                            f"👀 Any takers for **{current_player_name}** ?"
+                        )
+                    except Exception:
+                        pass
+            
+                elif remaining <= START_WARN_3_AT and remaining > 0 and not start_warn_3_sent:
+                    start_warn_3_sent = True
+                    try:
+                        await channel.send(
+                            f"🚨 LAST CHANCE! **{current_player_name}** going **UNSOLD**!"
+                        )
+                    except Exception:
+                        pass
                 elif remaining <= 0:
+                    # Time up -> mark unsold
                     if last_msg:
                         try:
                             await last_msg.delete()
@@ -2138,7 +2272,7 @@ async def countdown_loop(channel: discord.TextChannel):
                             pass
 
                     if not current_player_name:
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1)
                         await start_next_player(channel)
                         return
 
@@ -2169,21 +2303,19 @@ async def countdown_loop(channel: discord.TextChannel):
                             f"⏰ No bids received - Player **{player_display}** goes **UNSOLD**"
                         )
 
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1.5)
                     await start_next_player(channel)
                     return
 
             else:
-                # Bid placed - apply gap
+                # Bid-placed branch: apply bid-gap then NO_BID_TIMEOUT countdown rules
                 elapsed_since_last_bid = now - bot.auction_manager.last_bid_time
 
-                # Subtract GAP from elapsed time.
-                # E.g. Gap=5, Elapsed=3 -> Effective=-2 (Waiting)
-                # Gap=5, Elapsed=6 -> Effective=1 (Countdown active)
+                # Subtract configured gap period before countdown begins
                 effective_elapsed = elapsed_since_last_bid - countdown_gap
 
                 if effective_elapsed < 0:
-                    # Still in gap period, silent wait
+                    # Still in gap period; wait silently
                     continue
 
                 remaining = NO_BID_TIMEOUT - effective_elapsed
@@ -2191,21 +2323,31 @@ async def countdown_loop(channel: discord.TextChannel):
                 current_bid = bot.auction_manager.current_bid
                 current_team = bot.auction_manager.highest_bidder
 
-                if remaining <= 12 and remaining > 8 and not going_once_sent:
+                # Use three concise warnings: GOING ONCE / GOING TWICE / GOING THRICE (no times)
+                if remaining <= max(1, int(NO_BID_TIMEOUT * 0.66)) and remaining > max(1, int(NO_BID_TIMEOUT * 0.33)) and not going_once_sent:
                     going_once_sent = True
-                    await channel.send(
-                        f"🔔 **GOING ONCE!** {format_amount(current_bid)} to **{current_team}**!"
-                    )
-                elif remaining <= 8 and remaining > 4 and not going_twice_sent:
+                    try:
+                        await channel.send(
+                            f"🔔 **GOING ONCE!** {format_amount(current_bid)} to **{current_team}**!"
+                        )
+                    except Exception:
+                        pass
+                elif remaining <= max(1, int(NO_BID_TIMEOUT * 0.33)) and remaining > 1 and not going_twice_sent:
                     going_twice_sent = True
-                    await channel.send(
-                        f"🔔🔔 **GOING TWICE!** {format_amount(current_bid)} to **{current_team}**!"
-                    )
-                elif remaining <= 4 and remaining > 0 and not going_thrice_sent:
+                    try:
+                        await channel.send(
+                            f"🔔🔔 **GOING TWICE!** {format_amount(current_bid)} to **{current_team}**!"
+                        )
+                    except Exception:
+                        pass
+                elif remaining <= 1 and remaining > 0 and not going_thrice_sent:
                     going_thrice_sent = True
-                    await channel.send(
-                        f"🔔🔔🔔 **GOING THRICE!** Last chance! {format_amount(current_bid)} to **{current_team}**!"
-                    )
+                    try:
+                        await channel.send(
+                            f"🔔🔔🔔 **GOING THRICE!** Last chance! {format_amount(current_bid)} to **{current_team}**!"
+                        )
+                    except Exception:
+                        pass
 
                 elif remaining <= 0:
                     if last_msg:
@@ -2217,7 +2359,7 @@ async def countdown_loop(channel: discord.TextChannel):
                     player_name = bot.auction_manager.current_player
 
                     if not player_name:
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1)
                         await start_next_player(channel)
                         return
 
@@ -2235,7 +2377,7 @@ async def countdown_loop(channel: discord.TextChannel):
                     if player_already_sold:
                         bot.auction_manager._reset_player_state()
                         bot.auction_manager._save_state_to_db()
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1)
                         await start_next_player(channel)
                         return
 
@@ -2276,7 +2418,7 @@ async def countdown_loop(channel: discord.TextChannel):
                             f"⚠️ Error finalizing sale for **{player_display}**. Moving to next player."
                         )
 
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1.5)
                     await start_next_player(channel)
                     return
 
@@ -3054,7 +3196,7 @@ async def sold_to(interaction: discord.Interaction, team: str):
 
         bot.create_background_task(bot.update_stats_display())
 
-        await asyncio.sleep(2)
+        await asyncio.sleep(1.5)
         await start_next_player(interaction.channel)
     else:
         await interaction.response.send_message(
@@ -3152,7 +3294,7 @@ async def show_unsold(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="reauctionall",
-    description="Bring ALL unsold players back to auction (Admin only)",
+    description="Bring ALL unsold players back to auction (Admin only)"
 )
 @admin_or_owner_check()
 @channel_permission_check("reauctionall")
@@ -3177,7 +3319,7 @@ async def reauction_all(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="reauctionlist",
-    description="Bring back unsold players from a specific set (Admin only)",
+    description="Bring back unsold players from a specific set (Admin only)"
 )
 @app_commands.describe(
     set_name="Set name to re-auction unsold players from (e.g., M1, BA1)"
@@ -3211,7 +3353,7 @@ async def reauction_from_list(interaction: discord.Interaction, set_name: str):
 
 @bot.tree.command(
     name="reauctionmultiple",
-    description="Re-auction multiple specific players by name (Admin only)",
+    description="Re-auction multiple specific players by name (Admin only)"
 )
 @app_commands.describe(
     player_names="Comma-separated player names (e.g., Player1, Player2, Player3)"
@@ -3277,7 +3419,7 @@ async def find_player_cmd(interaction: discord.Interaction, name: str):
 
 @bot.tree.command(
     name="changebaseprice",
-    description="Change base price for players (use 'released' to change all released players)",
+    description="Change base price for players (use 'released' to change all released players)"
 )
 @app_commands.describe(
     players="Comma-separated player names OR the keyword 'released'",
